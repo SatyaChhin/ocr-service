@@ -1,0 +1,43 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Testing / coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# --- Secrets / local config ---
+.env
+.env.*
+!.env.example
+
+# --- Tesseract language data ---
+# Third-party binary blobs (~26 MB) from tesseract-ocr/tessdata.
+# run.ps1 points TESSDATA_PREFIX here -- see ocr_service/README.md to download.
+# Delete this line if you would rather vendor them for a one-step checkout.
+tessdata/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

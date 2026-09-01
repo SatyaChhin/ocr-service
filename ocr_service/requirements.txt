@@ -1,0 +1,29 @@
+# Runtime dependencies.
+#
+# Tested against CPython 3.11-3.13. Python 3.14 is not recommended yet:
+# opencv-python does not publish wheels for it at these versions, and pip
+# will try (and usually fail) to build OpenCV from source.
+#
+# System packages are NOT installable from here -- see README.md for the
+# tesseract-ocr (with eng + fra data) and poppler-utils prerequisites.
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+pytesseract==0.3.13
+pillow==11.1.0
+
+# Headless build: same `cv2` module, minus the GUI/X11 stack that a server
+# image has no use for. Swap for `opencv-python==4.10.0.84` if you need
+# cv2.imshow() while debugging locally.
+opencv-python-headless==4.10.0.84
+numpy==2.1.3
+
+pdf2image==1.17.0
+
+# Best-effort language identification of the extracted text. Tesseract does
+# not report which of `eng+fra` it actually matched.
+langdetect==1.0.9
+
+pydantic==2.10.4
