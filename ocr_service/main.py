@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -28,7 +29,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import ocr, pdf_utils
+from . import engines, lab_results, ocr, pdf_utils
 
 # --------------------------------------------------------------------------
 # Limits and configuration
@@ -103,14 +104,47 @@ class PageResult(BaseModel):
     words: list[WordBox] | None = None
 
 
+class LabNote(BaseModel):
+    code: str = Field(description=(
+        "low_confidence | flag_not_set | flag_unexpected | flag_wrong_direction | differential_mismatch | "
+        "differential_sum | index_mismatch | unit_missing | unit_differs | name_fuzzy"
+    ))
+    params: dict[str, Any]
+
+
+class LabReview(BaseModel):
+    page: int
+    confidence: float | None = Field(description="OCR confidence of the value, 0-100")
+    source: str = Field(description="The report row the result was read from")
+    cross_checked: list[str] = Field(description="Consistency checks this value passed")
+    notes: list[LabNote]
+    needs_review: bool = Field(description="True when any note is present: check against the document")
+
+
+class LabUnparsed(BaseModel):
+    page: int
+    text: str
+
+
+class LabExtraction(BaseModel):
+    results: list[dict[str, Any]] = Field(description=(
+        "Database-ready records: test_name, [percent], value, flag, unit, ref_range, section. "
+        "`percent` is present only on differential rows."
+    ))
+    review: list[LabReview] = Field(description="review[i] describes results[i]")
+    unparsed: list[LabUnparsed] = Field(description="Table rows with numbers that were not read as results")
+
+
 class OcrResponse(BaseModel):
     filename: str | None
     media_type: str
+    engine: str = Field(description="OCR engine that produced the result: 'surya' or 'tesseract'")
     lang: str
     page_count: int
     languages: list[LanguageGuess]
     text: str = Field(description="All pages joined, separated by a form feed")
     pages: list[PageResult]
+    lab: LabExtraction | None = Field(None, description="Structured lab results, when requested with lab=true")
     duration_ms: float
 
 
@@ -126,17 +160,22 @@ class ErrorResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    engine = ocr.engine_info()
     pdf = pdf_utils.backend_info()
     app.state.semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
 
-    if engine["available"]:
-        missing = [code for code in ocr.EXPECTED_LANGS if code not in engine["languages"]]
-        logger.info("Tesseract %s ready (%d languages)", engine["version"], len(engine["languages"]))
-        if missing:
-            logger.warning("Missing expected language data: %s", ", ".join(missing))
+    if engines.name() == "surya":
+        # Loading the models takes ~15 s; do it off the event loop so the
+        # service answers /health (state: loading) in the meantime.
+        logger.info("OCR engine: Surya (loading models in the background)")
+        threading.Thread(target=engines.warm_up, name="surya-warm-up", daemon=True).start()
     else:
-        logger.error("Tesseract is unavailable (%s); /ocr will return 503", engine["error"])
+        engine = ocr.engine_info()
+        if engine["available"]:
+            logger.info("OCR engine: Tesseract %s (%d languages)", engine["version"], len(engine["languages"]))
+            if engines.missing_languages():
+                logger.warning("Missing expected language data: %s", ", ".join(engines.missing_languages()))
+        else:
+            logger.error("Tesseract is unavailable (%s); /ocr will return 503", engine["error"])
 
     if pdf["available"]:
         logger.info("PDF backend: %s", pdf["backend"])
@@ -150,8 +189,8 @@ app = FastAPI(
     version="1.0.0",
     description=(
         "Extracts text from scanned or photographed documents (PNG/JPEG/WEBP/PDF) "
-        "using Tesseract with English and French language data. Documents are "
-        "processed in memory and never logged."
+        "using Surya OCR on the GPU, with Tesseract available as a fallback "
+        "(OCR_ENGINE=tesseract). Documents are processed in memory and never logged."
     ),
     lifespan=lifespan,
 )
@@ -308,7 +347,7 @@ def sniff_media_type(data: bytes) -> str:
 # --------------------------------------------------------------------------
 
 
-def _process(data: bytes, media_type: str, lang: str, detail: bool, dpi: int) -> dict[str, Any]:
+def _process(data: bytes, media_type: str, lang: str, detail: bool, dpi: int, lab: bool) -> dict[str, Any]:
     pages: list[dict[str, Any]] = []
 
     if media_type == "application/pdf":
@@ -317,7 +356,9 @@ def _process(data: bytes, media_type: str, lang: str, detail: bool, dpi: int) ->
         sources = [(1, ocr.decode_image(data))]
 
     for number, image in sources:
-        page = ocr.ocr_page(image, lang=lang, detail=detail)
+        # Lab extraction rebuilds table rows from word boxes, so it needs them
+        # even when the client did not ask for detail.
+        page = engines.ocr_page(image, lang=lang, detail=detail or lab)
         page["page"] = number
         pages.append(page)
         del image  # release the rendered page before the next one is built
@@ -325,11 +366,17 @@ def _process(data: bytes, media_type: str, lang: str, detail: bool, dpi: int) ->
     if not pages:
         raise ocr.OcrError("No pages could be processed")
 
+    extraction = lab_results.extract(pages) if lab else None
+    if lab and not detail:
+        for page in pages:
+            page["words"] = None
+
     return {
         "pages": pages,
         # Form feed is the conventional page separator in plain-text output.
         "text": "\f".join(page["text"] for page in pages),
         "languages": ocr.merge_languages([page["languages"] for page in pages]),
+        "lab": extraction,
     }
 
 
@@ -344,7 +391,7 @@ def _process(data: bytes, media_type: str, lang: str, detail: bool, dpi: int) ->
     responses={
         400: {"model": ErrorResponse, "description": "Unsupported or unreadable file, or bad lang"},
         413: {"model": ErrorResponse, "description": "File exceeds the size limit"},
-        503: {"model": ErrorResponse, "description": "Tesseract or poppler unavailable"},
+        503: {"model": ErrorResponse, "description": "OCR engine or poppler unavailable"},
     },
     summary="Extract text from an uploaded image or PDF",
 )
@@ -359,6 +406,7 @@ async def extract_text(
         le=pdf_utils.MAX_DPI,
         description="Rasterisation DPI for PDF pages",
     ),
+    lab: bool = Query(False, description="Also extract structured lab results (the `lab` field)"),
 ) -> OcrResponse:
     started = time.perf_counter()
     # Order matters: reject a malformed request on the cheap checks first, so a
@@ -366,7 +414,7 @@ async def extract_text(
     ocr.normalize_lang(lang)
     data = await _read_capped(file)
     media_type = sniff_media_type(data)
-    validated_lang = ocr.validate_lang(lang)
+    validated_lang = engines.validate_lang(lang)
 
     logger.info(
         "%s ocr request type=%s bytes=%d lang=%s detail=%s",
@@ -380,17 +428,19 @@ async def extract_text(
     semaphore: asyncio.Semaphore = request.app.state.semaphore
     async with semaphore:
         result = await run_in_threadpool(
-            _process, data, media_type, validated_lang, detail, pdf_utils.clamp_dpi(dpi)
+            _process, data, media_type, validated_lang, detail, pdf_utils.clamp_dpi(dpi), lab
         )
 
     return OcrResponse(
         filename=file.filename,
         media_type=media_type,
+        engine=engines.name(),
         lang=validated_lang,
         page_count=len(result["pages"]),
         languages=result["languages"],
         text=result["text"],
         pages=result["pages"],
+        lab=result["lab"],
         duration_ms=round((time.perf_counter() - started) * 1000, 1),
     )
 
@@ -399,17 +449,20 @@ async def extract_text(
 async def health() -> dict[str, Any]:
     """Always 200 so a liveness probe does not restart a running process.
 
-    Use the ``ready`` flag for readiness: it is false when Tesseract or the
-    expected language data is missing.
+    Use the ``ready`` flag for readiness: it is false while Surya's models are
+    still loading, when the active engine failed to load, and (for Tesseract)
+    when expected language data is missing.
     """
     engine = ocr.engine_info()
     pdf = pdf_utils.backend_info()
     missing = [code for code in ocr.EXPECTED_LANGS if code not in engine["languages"]]
-    ready = bool(engine["available"]) and not missing
+    ready = engines.ready()
 
     return {
         "status": "ok" if ready else "degraded",
         "ready": ready,
+        "engine": {**engines.info(), "missing_expected": engines.missing_languages()},
+        # The fallback engine's status, reported whichever engine is active.
         "tesseract": {
             "available": engine["available"],
             "version": engine["version"],

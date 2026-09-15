@@ -477,6 +477,32 @@ def _reassemble(words: list[dict[str, Any]]) -> str:
     return "\n".join(lines).strip()
 
 
+#: Two boxes whose vertical extents overlap by at least this share of the
+#: shorter one sit on the same visual row.
+ROW_OVERLAP = float(os.getenv("OCR_ROW_OVERLAP", "0.5"))
+
+
+def group_rows(items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group boxes (``bbox`` = ``[x0, y0, x1, y1]``) into visual rows, each left to right.
+
+    Items are taken in order of vertical centre and compared with the first
+    item of the current row, not the row's growing extent, so a slightly
+    sloped page cannot chain every line into one row.
+    """
+    rows: list[list[dict[str, Any]]] = []
+    span: tuple[float, float] = (0.0, 0.0)
+    for item in sorted(items, key=lambda it: (it["bbox"][1] + it["bbox"][3]) / 2):
+        top, bottom = item["bbox"][1], item["bbox"][3]
+        if rows:
+            overlap = min(bottom, span[1]) - max(top, span[0])
+            if overlap >= ROW_OVERLAP * min(bottom - top, span[1] - span[0]):
+                rows[-1].append(item)
+                continue
+        rows.append([item])
+        span = (top, bottom)
+    return [sorted(row, key=lambda it: it["bbox"][0]) for row in rows]
+
+
 def ocr_page(
     image: np.ndarray,
     *,
