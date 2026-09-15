@@ -88,6 +88,15 @@ _DEPARTMENT = re.compile(
 )
 _FOOTER = re.compile(r"ថ្ងៃពិសោធន៍|ថ្ងៃចេញលទ្ធផល|ត្រួតពិនិត្យ|\b(?:validated|verified|approved)\s+by\b", re.I)
 
+# Report header: what links the results to a patient and a sample. The name
+# and address are deliberately not extracted -- the patient code is enough
+# to join on, and it keeps identifying details out of the results database.
+_PATIENT_CODE = re.compile(r"(?:លេខអ្នកជំងឺ|patient\s*(?:id|no\.?|code))\s*[:៖]?\s*([A-Z0-9][A-Z0-9-]{3,})", re.I)
+_SAMPLE_NO = re.compile(r"(?<![\d-])(\d{3,5}-\d{6,8})(?![\d-])")
+_DATETIME = re.compile(r"\b(\d{1,2})-([A-Za-z]{3})-(\d{4})\s+(\d{1,2}):(\d{2})\b")
+_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+
 
 # --------------------------------------------------------------------------
 # Catalog
@@ -498,14 +507,57 @@ def _cross_checks(records: list[dict[str, Any]], notes: list[list[dict[str, Any]
 
 
 # --------------------------------------------------------------------------
+# Report header
+# --------------------------------------------------------------------------
+
+
+def _iso_datetime(match: re.Match[str]) -> str | None:
+    day, month, year, hour, minute = match.groups()
+    number = _MONTHS.get(month.lower())
+    if number is None:
+        return None
+    return f"{int(year):04d}-{number:02d}-{int(day):02d}T{int(hour):02d}:{minute}:00"
+
+
+def _scan_header(text: str, header: dict[str, Any]) -> None:
+    """Pick up the patient code, sample number and sample times from a row.
+
+    The first value found wins; a different value later (a second page for
+    another patient in the same upload) is recorded under ``conflicts``.
+    """
+    found: dict[str, str | None] = {}
+    match = _PATIENT_CODE.search(text)
+    if match:
+        found["patient_code"] = match.group(1)
+    # The specimen row: "Blood-EDTA 0007-10092026 ... 10-Sep-2026 04:45 10-Sep-2026 05:43"
+    times = list(_DATETIME.finditer(text))
+    sample = _SAMPLE_NO.search(text)
+    if sample and times:
+        found["sample_no"] = sample.group(1)
+        found["collected_at"] = _iso_datetime(times[0])
+        if len(times) > 1:
+            found["received_at"] = _iso_datetime(times[1])
+    for key, value in found.items():
+        if value is None:
+            continue
+        if header.get(key) is None:
+            header[key] = value
+        elif header[key] != value and key not in header["conflicts"]:
+            header["conflicts"].append(key)
+
+
+# --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
 
 
 def extract(pages: list[dict[str, Any]]) -> dict[str, Any]:
-    """OCR pages (with ``words``) -> ``{"results", "review", "unparsed"}``.
+    """OCR pages (with ``words``) -> ``{"report", "results", "review", "unparsed"}``.
 
-    ``results`` is the database-ready list. ``review[i]`` describes
+    ``report`` is the header that links the results to a patient and sample:
+    ``patient_code``, ``sample_no``, ``collected_at``, ``received_at`` (ISO
+    8601, or None when not found) and ``conflicts`` (fields whose value
+    differed between pages). ``results`` is the database-ready list. ``review[i]`` describes
     ``results[i]``: its page, the OCR confidence of its value, the source
     row, the cross-checks it passed and its notes. Any note means a person
     should check that value against the document before it is inserted.
@@ -517,6 +569,8 @@ def extract(pages: list[dict[str, Any]]) -> dict[str, Any]:
     notes: list[list[dict[str, Any]]] = []
     unparsed: list[dict[str, Any]] = []
     confidences: list[float | None] = []
+    header: dict[str, Any] = {"patient_code": None, "sample_no": None, "collected_at": None,
+                              "received_at": None, "conflicts": []}
 
     for page in pages:
         rows = rows_from_page(page)
@@ -526,6 +580,7 @@ def extract(pages: list[dict[str, Any]]) -> dict[str, Any]:
 
         for row in rows:
             text = row.text.strip()
+            _scan_header(text, header)
             if _TABLE_HEADER.search(text):
                 in_table, heading = True, None
                 continue
@@ -559,4 +614,4 @@ def extract(pages: list[dict[str, Any]]) -> dict[str, Any]:
             row_notes.insert(0, {"code": "low_confidence", "params": {"confidence": round(confidence, 1)}})
         entry["notes"] = row_notes
         entry["needs_review"] = bool(row_notes)
-    return {"results": records, "review": review, "unparsed": unparsed}
+    return {"report": header, "results": records, "review": review, "unparsed": unparsed}

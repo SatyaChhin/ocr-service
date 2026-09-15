@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, Iterable
 
 from fastapi import FastAPI, File, Query, Request, UploadFile
@@ -29,7 +30,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import engines, lab_results, ocr, pdf_utils
+from . import db, engines, lab_results, ocr, pdf_utils
 
 # --------------------------------------------------------------------------
 # Limits and configuration
@@ -126,7 +127,16 @@ class LabUnparsed(BaseModel):
     text: str
 
 
+class LabReportHeader(BaseModel):
+    patient_code: str | None = Field(None, max_length=64, description="e.g. KCM-260910054323")
+    sample_no: str | None = Field(None, max_length=64, description="e.g. 0007-10092026")
+    collected_at: datetime | None = None
+    received_at: datetime | None = None
+    conflicts: list[str] = Field(default_factory=list, description="Fields whose value differed between pages")
+
+
 class LabExtraction(BaseModel):
+    report: LabReportHeader = Field(description="Links the results to a patient and sample")
     results: list[dict[str, Any]] = Field(description=(
         "Database-ready records: test_name, [percent], value, flag, unit, ref_range, section. "
         "`percent` is present only on differential rows."
@@ -146,6 +156,36 @@ class OcrResponse(BaseModel):
     pages: list[PageResult]
     lab: LabExtraction | None = Field(None, description="Structured lab results, when requested with lab=true")
     duration_ms: float
+
+
+class LabResultIn(BaseModel):
+    """One record of ``lab.results``, as returned by /ocr?lab=true."""
+
+    test_name: str = Field(min_length=1, max_length=128)
+    percent: float | None = None
+    value: int | float | str
+    flag: str | None = Field(None, max_length=4)
+    unit: str | None = Field(None, max_length=32)
+    ref_range: str | None = Field(None, max_length=64)
+    section: str | None = Field(None, max_length=128)
+
+
+class SaveLabReport(BaseModel):
+    """Body of POST /lab-reports: the ``lab`` object of an /ocr response, plus context."""
+
+    filename: str | None = Field(None, max_length=255)
+    engine: str = Field(max_length=16)
+    report: LabReportHeader = Field(default_factory=LabReportHeader)
+    results: list[LabResultIn] = Field(min_length=1, max_length=500)
+    review: list[dict[str, Any]] = Field(default_factory=list, description="lab.review, stored per result")
+    replace: bool = Field(False, description="Overwrite a report already saved for the same patient + sample")
+
+
+class SavedLabReport(BaseModel):
+    id: int
+    results_saved: int
+    needs_review: int
+    replaced: int | None = Field(description="Id of the report this one replaced, if any")
 
 
 class ErrorResponse(BaseModel):
@@ -266,6 +306,26 @@ async def _ocr_error(request: Request, exc: ocr.OcrError):
 async def _pdf_error(request: Request, exc: pdf_utils.PdfError):
     _log_failure(request, exc, 400)
     return _error(request, 400, str(exc) or "The PDF could not be processed")
+
+
+@app.exception_handler(db.DatabaseUnavailable)
+async def _database_unavailable(request: Request, exc: db.DatabaseUnavailable):
+    _log_failure(request, exc, 503)
+    return _error(request, 503, "The results database is not reachable. Check MySQL and OCR_DB_* in .env")
+
+
+@app.exception_handler(db.DuplicateReport)
+async def _duplicate_report(request: Request, exc: db.DuplicateReport):
+    request_id = getattr(request.state, "request_id", None)
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": f"This report is already saved (report {exc.report_id}). Send replace=true to overwrite it.",
+            "request_id": request_id,
+            "report_id": exc.report_id,
+        },
+        headers={"X-Request-ID": request_id} if request_id else None,
+    )
 
 
 @app.exception_handler(RequestValidationError)
@@ -445,6 +505,56 @@ async def extract_text(
     )
 
 
+# --------------------------------------------------------------------------
+# Saved lab reports (MySQL)
+# --------------------------------------------------------------------------
+
+
+@app.post(
+    "/lab-reports",
+    status_code=201,
+    response_model=SavedLabReport,
+    responses={
+        409: {"model": ErrorResponse, "description": "Already saved for this patient + sample (see report_id)"},
+        503: {"model": ErrorResponse, "description": "Database not reachable"},
+    },
+    summary="Save lab results into the database",
+)
+async def save_lab_report(body: SaveLabReport) -> SavedLabReport:
+    """Store the ``lab`` object of an ``/ocr?lab=true`` response.
+
+    Send ``report``, ``results`` and ``review`` as returned, plus the upload's
+    ``filename`` and the ``engine`` that read it. Results that need review are
+    saved with ``needs_review = 1`` so they can be checked later.
+    """
+    report = body.report.model_dump()
+    for key in ("collected_at", "received_at"):
+        report[key] = report[key].isoformat() if report[key] else None
+    saved = await run_in_threadpool(
+        db.save_report,
+        report=report,
+        results=[r.model_dump(exclude_unset=True) for r in body.results],  # no percent: null on plain rows
+        review=body.review,
+        filename=body.filename,
+        engine=body.engine,
+        replace=body.replace,
+    )
+    return SavedLabReport(**saved)
+
+
+@app.get("/lab-reports", summary="Recently saved lab reports")
+async def list_lab_reports(limit: int = Query(20, ge=1, le=200)) -> list[dict[str, Any]]:
+    return await run_in_threadpool(db.list_reports, limit)
+
+
+@app.get("/lab-reports/{report_id}", summary="One saved report, with its results in the JSON format")
+async def get_lab_report(report_id: int) -> dict[str, Any]:
+    report = await run_in_threadpool(db.get_report, report_id)
+    if report is None:
+        raise StarletteHTTPException(status_code=404, detail=f"No lab report {report_id}")
+    return report
+
+
 @app.get("/health", summary="Liveness and dependency status")
 async def health() -> dict[str, Any]:
     """Always 200 so a liveness probe does not restart a running process.
@@ -462,6 +572,8 @@ async def health() -> dict[str, Any]:
         "status": "ok" if ready else "degraded",
         "ready": ready,
         "engine": {**engines.info(), "missing_expected": engines.missing_languages()},
+        # Only saving lab reports needs it, so it does not affect `ready`.
+        "database": await run_in_threadpool(db.info),
         # The fallback engine's status, reported whichever engine is active.
         "tesseract": {
             "available": engine["available"],

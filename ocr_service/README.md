@@ -317,6 +317,41 @@ light, blur, noise, JPEG 55): 20 of 22 records exact, and both errors flagged
 `suggested: 0.2`). Tesseract reads only 13 of 22 from the clean PDF (it turns
 dot leaders and flags into noise), so use Surya for lab extraction.
 
+### Saving lab reports to MySQL
+
+`lab.report` carries the header that links the results to a patient:
+`patient_code`, `sample_no`, `collected_at`, `received_at` (ISO 8601). The
+patient's name and address are deliberately not extracted or stored.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /lab-reports` | Save `{filename, engine, report, results, review}` — the `lab` object of an `/ocr?lab=true` response plus context. `201 {id, results_saved, needs_review, replaced}`. `409` with `report_id` if this `patient_code` + `sample_no` is already saved; resend with `"replace": true` to overwrite. `503` if the database is down. |
+| `GET /lab-reports?limit=20` | Recently saved reports (header and counts). |
+| `GET /lab-reports/{id}` | One report, `results` in exactly the JSON format above, plus per-result `review`. |
+
+Tables (`schema.sql`, created on first use in the database named by
+`OCR_DB_NAME`):
+
+* `lab_reports` — one row per saved report; unique on `(patient_code, sample_no)`.
+* `lab_results` — one row per result: `test_name`, `percent`, `value` (as
+  reported, text), `value_numeric` (when it is a number, for queries), `flag`,
+  `unit`, `ref_range`, `section`, plus `needs_review`, `review_notes` (JSON)
+  and `ocr_confidence`. Deleting a report deletes its results.
+
+Results that still need review are saved with `needs_review = 1` (the web UI
+asks before saving them), so they can be found later:
+
+```sql
+SELECT r.patient_code, r.sample_no, x.test_name, x.value, x.review_notes
+FROM lab_results x JOIN lab_reports r ON r.id = x.report_id
+WHERE x.needs_review = 1;
+```
+
+**On this machine** the database is the `ocr` schema on the local MariaDB
+12.3 service, reached as a dedicated user `ocr_app` that has rights on `ocr.*`
+only (its password is in the git-ignored `ocr-service/.env`; see
+`.env.example`). To remove it: `DROP USER 'ocr_app'@'localhost', 'ocr_app'@'127.0.0.1';`.
+
 ### `GET /health`
 
 Always returns **200** so a liveness probe will not restart a running
@@ -472,6 +507,9 @@ PyMuPDF (`fitz`), which rasterises fully in memory.
 | `OCR_ROW_OVERLAP` | `0.5` | Vertical overlap (share of the shorter box) for two boxes to count as one row — Surya lines, and words in lab tables |
 | `OCR_SURYA_DESKEW_MIN_DEG` | `0.3` | Straighten Surya pages tilted by at least this many degrees |
 | `OCR_LAB_CATALOG` | `ocr_service/lab_catalog.json` | Test catalog for `lab=true` |
+| `OCR_DB_HOST` / `OCR_DB_PORT` | `127.0.0.1` / `3306` | MySQL/MariaDB for saved lab reports |
+| `OCR_DB_USER` / `OCR_DB_PASSWORD` | `root` / empty | Database login (set in `.env`) |
+| `OCR_DB_NAME` | `ocr` | Database; must exist, tables are created on first use |
 | `OCR_LAB_MIN_CONFIDENCE` | `80` | Values read below this (and not cross-checked) get a `low_confidence` note |
 | `TORCH_DEVICE` | auto (`cuda` if available) | Surya setting: force `cpu` / `cuda` |
 | `MODEL_CACHE_DIR` | `%LOCALAPPDATA%\datalab\datalab\Cache\models` | Surya setting: where the weights are cached |
@@ -510,11 +548,12 @@ The suite runs with `OCR_ENGINE=tesseract` (set in `conftest.py`) and needs
 neither a GPU nor the Surya models: the Surya mapping and request path are
 tested against fake predictions. Tesseract end-to-end tests skip themselves
 when the binary is missing. Lab extraction is tested on a synthetic page with
-the report's layout (`test_lab_results.py`). 59 tests, ~5 s. To also run
-Surya on the real models (~15 s, needs the download):
+the report's layout (`test_lab_results.py`). 63 tests, ~5 s. Opt-in tests
+against real resources:
 
 ```bash
-OCR_TEST_SURYA=1 pytest ocr_service/tests/test_surya.py
+OCR_TEST_SURYA=1 pytest ocr_service/tests/test_surya.py   # Surya models (~15 s, needs the download)
+OCR_TEST_DB=1 pytest ocr_service/tests/test_db.py         # the database in .env; deletes what it writes
 ```
 
 On Windows, if `fra.traineddata` / `khm.traineddata` cannot be written into
