@@ -372,7 +372,9 @@ def stub_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         ocr,
         "engine_info",
-        lambda: {"available": True, "version": "5.3.4", "languages": ["eng", "fra"], "error": None},
+        # The three languages this deployment ships (see ocr.EXPECTED_LANGS),
+        # so the default lang spec validates against the stub.
+        lambda: {"available": True, "version": "5.3.4", "languages": ["eng", "fra", "khm"], "error": None},
     )
     monkeypatch.setattr(ocr.pytesseract, "image_to_data", lambda *a, **kw: dict(_FAKE_TSV))
 
@@ -387,7 +389,7 @@ def test_ocr_returns_pages_and_word_boxes(client: TestClient, stub_engine: None)
     assert response.status_code == 200
     body = response.json()
     assert body["media_type"] == "image/png"
-    assert body["lang"] == "eng+fra"
+    assert body["lang"] == ocr.DEFAULT_LANG  # echoed back, whatever the default is
     assert body["page_count"] == 1
     assert body["text"] == "Nom Dupont\nDate"
 

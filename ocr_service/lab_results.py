@@ -6,11 +6,11 @@ Turns the rows of a lab report such as
 
 into database-ready records, in the shape the lab system inserts::
 
-    {"test_name": "Hemoglobin", "value": 9.9, "flag": "L", "unit": "g/dL",
-     "ref_range": "12 - 15", "section": "COMPLETE BLOOD COUNT"}
+    {"name": "Hemoglobin", "value": 9.9, "flag": "L", "unit": "g/dL",
+     "ref_range": "12 - 15", "category": "COMPLETE BLOOD COUNT"}
 
 Differential rows ("Neutrophils (%) 65.7% 7.15 H x10^9/L 2 - 7") also carry
-``percent``, placed after ``test_name`` as in the database format.
+``percent``, placed after ``name`` as in the database format.
 
 Alongside the records comes a review list: per-record OCR confidence and
 consistency checks that catch misread digits -- the H/L flag against the
@@ -19,9 +19,9 @@ indices against RBC/Hb/Hct. OCR is never perfect, and a wrong digit in a lab
 value is worse than a missing one, so every record says whether it needs a
 human look before it is inserted.
 
-Test names, sections and canonical units come from ``lab_catalog.json`` (the
+Test names, categories and canonical units come from ``lab_catalog.json`` (the
 lab's test list); tests not in the catalog are still extracted, with the
-nearest heading on the report as their section.
+nearest heading on the report as their category.
 
 Pure functions over the engine's page dicts. Nothing here logs document
 content.
@@ -105,8 +105,8 @@ _MONTHS = {m: i for i, m in enumerate(
 
 @dataclass(frozen=True)
 class CatalogTest:
-    test_name: str
-    section: str | None
+    name: str
+    category: str | None
     unit: str | None
     kind: str  # "number" | "text"
     aliases: tuple[str, ...]
@@ -128,11 +128,11 @@ def catalog() -> tuple[CatalogTest, ...]:
     data = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
     tests = []
     for entry in data["tests"]:
-        aliases = (entry["test_name"], *entry.get("aliases", ()))
+        aliases = (entry["name"], *entry.get("aliases", ()))
         tests.append(
             CatalogTest(
-                test_name=entry["test_name"],
-                section=entry.get("section"),
+                name=entry["name"],
+                category=entry.get("category"),
                 unit=entry.get("unit"),
                 kind=entry.get("kind", "number"),
                 aliases=aliases,
@@ -275,7 +275,7 @@ def _match_catalog(text: str) -> tuple[CatalogTest | None, str, str, dict[str, A
     guess = difflib.get_close_matches(_norm(name), _fuzzy_index(), n=1, cutoff=0.85) if len(_norm(name)) >= 5 else []
     if guess:
         test = _fuzzy_index()[guess[0]]
-        note = {"code": "name_fuzzy", "params": {"read": name, "matched": test.test_name}}
+        note = {"code": "name_fuzzy", "params": {"read": name, "matched": test.name}}
         return test, name, rest, note
     return None, name, rest, None
 
@@ -306,8 +306,8 @@ def parse_row(text: str, heading: str | None) -> Parsed | None:
         value = re.sub(r"^(AB|A|B|O)\s*(Rh\b)", r"\1 \2", value)
         if not value:
             return None
-        record = {"test_name": test.test_name, "value": value, "flag": None, "unit": None,
-                  "ref_range": None, "section": test.section or heading}
+        record = {"name": test.name, "value": value, "flag": None, "unit": None,
+                  "ref_range": None, "category": test.category or heading}
         return Parsed(record, notes, value.split())
 
     percent_expected = (test.percent if test else False) or name.rstrip().endswith("(%)")
@@ -326,14 +326,14 @@ def parse_row(text: str, heading: str | None) -> Parsed | None:
             return None
         if not isinstance(parts["value"], (int, float)) and not parts["ref_range"]:
             return None
-        test_name = re.sub(r"\s*\(%\)$", "", name) if parts["percent"] is not None else name
-        unit, section = parts["unit"], heading
+        resolved = re.sub(r"\s*\(%\)$", "", name) if parts["percent"] is not None else name
+        unit, category = parts["unit"], heading
     else:
-        test_name = test.test_name
+        resolved = test.name
         unit = _reconcile_unit(parts["unit"], test, notes)
-        section = test.section or heading
+        category = test.category or heading
 
-    record: dict[str, Any] = {"test_name": test_name}
+    record: dict[str, Any] = {"name": resolved}
     if parts["percent"] is not None:
         record["percent"] = parts["percent"]
         if not parts["percent_sign"]:
@@ -341,7 +341,7 @@ def parse_row(text: str, heading: str | None) -> Parsed | None:
             # "0.2%" -> "0.296". _cross_checks may suggest the reading.
             notes.append({"code": "percent_sign_missing", "params": {"read": parts["tokens"][1]}})
     record.update(value=parts["value"], flag=parts["flag"], unit=unit,
-                  ref_range=parts["ref_range"], section=section)
+                  ref_range=parts["ref_range"], category=category)
     return Parsed(record, notes, [t for t in parts["tokens"] if t])
 
 
@@ -422,7 +422,7 @@ def _check_flag(record: dict[str, Any]) -> dict[str, Any] | None:
 
 def _value_of(records: list[dict[str, Any]], name: str, unit: str | None = None) -> float | None:
     for record in records:
-        if record["test_name"] == name and isinstance(record["value"], (int, float)):
+        if record["name"] == name and isinstance(record["value"], (int, float)):
             if unit is None or record["unit"] == unit:
                 return float(record["value"])
     return None
@@ -436,7 +436,7 @@ def _cross_checks(records: list[dict[str, Any]], notes: list[list[dict[str, Any]
     satisfies one of these relations is confirmed by the others, whatever
     confidence OCR gave it.
     """
-    index = {record["test_name"]: i for i, record in enumerate(records)}
+    index = {record["name"]: i for i, record in enumerate(records)}
     passed: dict[int, list[str]] = {}
 
     def confirm(names: list[str], formula: str) -> None:
@@ -457,7 +457,7 @@ def _cross_checks(records: list[dict[str, Any]], notes: list[list[dict[str, Any]
         if wbc is None or not isinstance(record["value"], (int, float)):
             all_pairs_hold = False
             continue
-        formula = f"{record['test_name']} % × WBC"
+        formula = f"{record['name']} % × WBC"
         if pair_holds(record["percent"], record["value"]):
             passed.setdefault(i, []).append(formula)
             continue

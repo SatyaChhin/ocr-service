@@ -9,8 +9,9 @@ Connection settings come from the environment, or from ``ocr-service/.env``
     OCR_DB_PASSWORD=
     OCR_DB_NAME=ocr
 
-The tables in ``schema.sql`` are created on first use. Every query is
-parameterised, and nothing here logs document content.
+The table in ``schema.sql`` is created on first use. One row per report holds
+its results as JSON, exactly as ``/ocr?lab=true`` returned them. Every query
+is parameterised, and nothing here logs document content.
 """
 
 from __future__ import annotations
@@ -94,6 +95,8 @@ def _ensure_schema(conn: pymysql.connections.Connection) -> None:
         with conn.cursor() as cur:
             for statement in statements:
                 cur.execute(statement)
+            _migrate_results_into_json(cur)
+            _migrate_result_keys(cur)
         conn.commit()
         _schema_ready = True
 
@@ -112,7 +115,7 @@ def info() -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
-# Mapping between the JSON format and table rows (pure; tested without a DB)
+# JSON columns
 # --------------------------------------------------------------------------
 
 
@@ -122,29 +125,32 @@ def _mysql_datetime(value: str | None) -> str | None:
     return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def result_rows(results: list[dict[str, Any]], review: list[dict[str, Any]]) -> list[tuple]:
-    """``lab.results`` (+ ``lab.review``) -> ``lab_results`` column tuples."""
-    rows = []
-    for position, result in enumerate(results, start=1):
-        entry = review[position - 1] if position - 1 < len(review) else {}
-        value = result["value"]
-        numeric = value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
-        notes = entry.get("notes") or []
-        rows.append((
-            position,
-            result["test_name"],
-            result.get("percent"),
-            str(value),
-            numeric,
-            result.get("flag"),
-            result.get("unit"),
-            result.get("ref_range"),
-            result.get("section"),
-            1 if entry.get("needs_review") else 0,
-            json.dumps(notes, ensure_ascii=False) if notes else None,
-            entry.get("confidence"),
-        ))
-    return rows
+def _dump(value: Any) -> str:
+    """A list/dict as it is stored: compact, Unicode kept as characters."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _load(value: Any, default: Any) -> Any:
+    """A JSON column as Python. Drivers hand these back as ``str``; MariaDB's
+    JSON is an alias for LONGTEXT, so never assume it is decoded already."""
+    if value is None:
+        return default
+    if isinstance(value, (list, dict)):
+        return value
+    return json.loads(value)
+
+
+def count_needs_review(review: list[dict[str, Any]]) -> int:
+    """How many results a person still has to check."""
+    return sum(1 for entry in review if entry.get("needs_review"))
+
+
+# --------------------------------------------------------------------------
+# One-time migration off the old lab_results table
+# --------------------------------------------------------------------------
+
+_LEGACY_COLUMNS = ("position, test_name, percent, value, value_numeric, flag, unit, ref_range, section, "
+                   "needs_review, review_notes, ocr_confidence")
 
 
 def _number(value: Decimal | None) -> int | float | None:
@@ -154,37 +160,124 @@ def _number(value: Decimal | None) -> int | float | None:
     return int(number) if number.is_integer() else number
 
 
-def result_json(row: dict[str, Any]) -> dict[str, Any]:
-    """A ``lab_results`` row -> the JSON format, keys in the original order."""
-    record: dict[str, Any] = {"test_name": row["test_name"]}
+def _legacy_result_json(row: dict[str, Any]) -> dict[str, Any]:
+    """An old ``lab_results`` row -> the JSON format, keys in the original order."""
+    record: dict[str, Any] = {"name": row["test_name"]}
     if row["percent"] is not None:
         record["percent"] = _number(row["percent"])
     value_numeric = _number(row["value_numeric"])
     record.update(
         value=value_numeric if value_numeric is not None else row["value"],
-        flag=row["flag"], unit=row["unit"], ref_range=row["ref_range"], section=row["section"],
+        flag=row["flag"], unit=row["unit"], ref_range=row["ref_range"], category=row["section"],
     )
     return record
+
+
+_RENAMED_KEYS = {"test_name": "name", "section": "category"}
+_KEY_ORDER = ("name", "percent", "value", "flag", "unit", "ref_range", "category")
+
+
+def rename_result_keys(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Results stored under the old key names -> the current ones.
+
+    ``test_name`` became ``name`` and ``section`` became ``category``. Keys are
+    re-emitted in the documented order so a migrated row is indistinguishable
+    from a freshly saved one.
+    """
+    renamed = []
+    for result in results:
+        record = {_RENAMED_KEYS.get(key, key): value for key, value in result.items()}
+        ordered = {key: record[key] for key in _KEY_ORDER if key in record}
+        ordered.update({k: v for k, v in record.items() if k not in ordered})  # anything unexpected
+        renamed.append(ordered)
+    return renamed
+
+
+def _migrate_result_keys(cur: Any) -> None:
+    """Rewrite reports saved before ``test_name``/``section`` were renamed."""
+    cur.execute("SELECT id, results FROM lab_reports WHERE results LIKE %s", ('%"test_name"%',))
+    rows = cur.fetchall()
+    for row in rows:
+        results = rename_result_keys(_load(row["results"], []))
+        cur.execute("UPDATE lab_reports SET results = %s WHERE id = %s", (_dump(results), row["id"]))
+    if rows:
+        logger.info("renamed test_name/section to name/category in %d report(s)", len(rows))
+
+
+def _has_table(cur: Any, name: str) -> bool:
+    cur.execute("SELECT COUNT(*) AS n FROM information_schema.TABLES"
+                " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s", (name,))
+    return bool(cur.fetchone()["n"])
+
+
+def _column_names(cur: Any, table: str) -> set[str]:
+    cur.execute("SELECT COLUMN_NAME AS c FROM information_schema.COLUMNS"
+                " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s", (table,))
+    return {row["c"] for row in cur.fetchall()}
+
+
+def _migrate_results_into_json(cur: Any) -> None:
+    """Fold a pre-JSON ``lab_results`` table into ``lab_reports.results``.
+
+    Results used to be one row per test in a child table. They are now stored
+    as the JSON the API returned. This runs inside the schema check, so a
+    database created before the change upgrades itself on first use; on a
+    fresh database it does nothing.
+    """
+    columns = _column_names(cur, "lab_reports")
+    if "results" not in columns:  # added NULL, made NOT NULL once backfilled
+        cur.execute("ALTER TABLE lab_reports ADD COLUMN results JSON NULL AFTER needs_review_count")
+    if "review" not in columns:
+        cur.execute("ALTER TABLE lab_reports ADD COLUMN review JSON NULL AFTER results")
+    if not _has_table(cur, "lab_results"):
+        return
+
+    # Only reports that have not been folded in yet, so re-running this (when
+    # the DROP below was refused) never overwrites the JSON with stale rows.
+    cur.execute(f"SELECT report_id, {_LEGACY_COLUMNS} FROM lab_results"
+                " WHERE report_id IN (SELECT id FROM lab_reports WHERE results IS NULL)"
+                " ORDER BY report_id, position")
+    by_report: dict[int, list[dict[str, Any]]] = {}
+    for row in cur.fetchall():
+        by_report.setdefault(row["report_id"], []).append(row)
+
+    for report_id, rows in by_report.items():
+        results = [_legacy_result_json(row) for row in rows]
+        review = [
+            {"confidence": float(row["ocr_confidence"]) if row["ocr_confidence"] is not None else None,
+             "notes": _load(row["review_notes"], []),
+             "needs_review": bool(row["needs_review"])}
+            for row in rows
+        ]
+        cur.execute("UPDATE lab_reports SET results = %s, review = %s WHERE id = %s",
+                    (_dump(results), _dump(review), report_id))
+
+    cur.execute("UPDATE lab_reports SET results = '[]' WHERE results IS NULL")
+    cur.execute("ALTER TABLE lab_reports MODIFY results JSON NOT NULL")
+    logger.info("migrated %d report(s) from lab_results into lab_reports.results", len(by_report))
+
+    # The service runs as a least-privilege user that may not hold DROP. The
+    # data is already copied at this point, so a refusal here is not fatal --
+    # the leftover table is simply no longer read or written.
+    try:
+        cur.execute("DROP TABLE lab_results")
+    except pymysql.MySQLError as exc:
+        logger.warning("lab_results is migrated but could not be dropped (%s); "
+                       "drop it by hand: DROP TABLE lab_results;", exc.args[-1] if exc.args else exc)
 
 
 # --------------------------------------------------------------------------
 # Queries
 # --------------------------------------------------------------------------
 
-_RESULT_COLUMNS = ("position, test_name, percent, value, value_numeric, flag, unit, ref_range, section, "
-                   "needs_review, review_notes, ocr_confidence")
-
-
 def save_report(*, report: dict[str, Any], results: list[dict[str, Any]], review: list[dict[str, Any]],
                 filename: str | None, engine: str, replace: bool = False) -> dict[str, Any]:
-    """Insert a report and its results in one transaction.
+    """Insert one report row holding its results as JSON.
 
     Raises DuplicateReport when patient_code + sample_no is already saved and
-    ``replace`` is false; with ``replace`` the old report and its results are
-    deleted first.
+    ``replace`` is false; with ``replace`` the old report is deleted first.
     """
-    rows = result_rows(results, review)
-    needs_review = sum(row[9] for row in rows)
+    needs_review = count_needs_review(review)
     with connect() as conn, conn.cursor() as cur:
         patient, sample = report.get("patient_code"), report.get("sample_no")
         replaced = None
@@ -199,17 +292,13 @@ def save_report(*, report: dict[str, Any], results: list[dict[str, Any]], review
                 replaced = existing["id"]
         cur.execute(
             "INSERT INTO lab_reports (patient_code, sample_no, collected_at, received_at, source_filename,"
-            " engine, results_count, needs_review_count) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            " engine, results_count, needs_review_count, results, review)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (patient, sample, _mysql_datetime(report.get("collected_at")), _mysql_datetime(report.get("received_at")),
-             filename, engine, len(rows), needs_review),
+             filename, engine, len(results), needs_review, _dump(results), _dump(review) if review else None),
         )
         report_id = cur.lastrowid
-        cur.executemany(
-            f"INSERT INTO lab_results (report_id, {_RESULT_COLUMNS})"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            [(report_id, *row) for row in rows],
-        )
-    return {"id": report_id, "results_saved": len(rows), "needs_review": needs_review, "replaced": replaced}
+    return {"id": report_id, "results_saved": len(results), "needs_review": needs_review, "replaced": replaced}
 
 
 def _report_json(row: dict[str, Any]) -> dict[str, Any]:
@@ -231,24 +320,21 @@ def get_report(report_id: int) -> dict[str, Any] | None:
     with connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM lab_reports WHERE id = %s", (report_id,))
         report = cur.fetchone()
-        if report is None:
-            return None
-        cur.execute(f"SELECT {_RESULT_COLUMNS} FROM lab_results WHERE report_id = %s ORDER BY position",
-                    (report_id,))
-        rows = cur.fetchall()
+    if report is None:
+        return None
     return {
         **_report_json(report),
-        "results": [result_json(row) for row in rows],
-        "review": [
-            {"needs_review": bool(row["needs_review"]),
-             "notes": json.loads(row["review_notes"]) if row["review_notes"] else [],
-             "confidence": float(row["ocr_confidence"]) if row["ocr_confidence"] is not None else None}
-            for row in rows
-        ],
+        "results": _load(report["results"], []),
+        "review": _load(report["review"], []),
     }
 
 
+_HEADER_COLUMNS = ("id, patient_code, sample_no, collected_at, received_at, source_filename, engine, "
+                   "results_count, needs_review_count, created_at")
+
+
 def list_reports(limit: int = 20) -> list[dict[str, Any]]:
+    """Report headers only -- the results JSON is not read."""
     with connect() as conn, conn.cursor() as cur:
-        cur.execute("SELECT * FROM lab_reports ORDER BY id DESC LIMIT %s", (limit,))
+        cur.execute(f"SELECT {_HEADER_COLUMNS} FROM lab_reports ORDER BY id DESC LIMIT %s", (limit,))
         return [_report_json(row) for row in cur.fetchall()]

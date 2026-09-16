@@ -1,32 +1,32 @@
 {
-  "_comment": "Known lab tests. test_name/section/unit are what /ocr?lab=true reports and should match the database. aliases are other spellings seen on reports (matched case-insensitively at the start of a row). kind 'text' marks a test whose result is words, not a number. Add tests here as new report types appear; override the path with OCR_LAB_CATALOG.",
+  "_comment": "Known lab tests. name/category/unit are what /ocr?lab=true reports and should match the database. aliases are other spellings seen on reports (matched case-insensitively at the start of a row). kind 'text' marks a test whose result is words, not a number. Add tests here as new report types appear; override the path with OCR_LAB_CATALOG.",
   "tests": [
-    {"test_name": "WBC", "section": "COMPLETE BLOOD COUNT", "unit": "x10^9/L", "aliases": ["White Blood Cells", "White Blood Cell Count", "WBC Count", "Leukocytes"]},
-    {"test_name": "RBC", "section": "COMPLETE BLOOD COUNT", "unit": "x10^12/L", "aliases": ["Red Blood Cells", "Red Blood Cell Count", "RBC Count", "Erythrocytes"]},
-    {"test_name": "Hemoglobin", "section": "COMPLETE BLOOD COUNT", "unit": "g/dL", "aliases": ["Haemoglobin", "HGB", "Hb"]},
-    {"test_name": "Hematocrit", "section": "COMPLETE BLOOD COUNT", "unit": "%", "aliases": ["Haematocrit", "HCT", "PCV"]},
-    {"test_name": "MCV", "section": "COMPLETE BLOOD COUNT", "unit": "fl", "aliases": []},
-    {"test_name": "MCH", "section": "COMPLETE BLOOD COUNT", "unit": "pg", "aliases": []},
-    {"test_name": "MCHC", "section": "COMPLETE BLOOD COUNT", "unit": "g/dL", "aliases": []},
-    {"test_name": "Platelets", "section": "COMPLETE BLOOD COUNT", "unit": "x10^9/L", "aliases": ["Platelet", "Platelet Count", "PLT"]},
-    {"test_name": "RDW-CV", "section": "COMPLETE BLOOD COUNT", "unit": "%", "aliases": ["RDW CV", "RDWCV"]},
+    {"name": "WBC", "category": "COMPLETE BLOOD COUNT", "unit": "x10^9/L", "aliases": ["White Blood Cells", "White Blood Cell Count", "WBC Count", "Leukocytes"]},
+    {"name": "RBC", "category": "COMPLETE BLOOD COUNT", "unit": "x10^12/L", "aliases": ["Red Blood Cells", "Red Blood Cell Count", "RBC Count", "Erythrocytes"]},
+    {"name": "Hemoglobin", "category": "COMPLETE BLOOD COUNT", "unit": "g/dL", "aliases": ["Haemoglobin", "HGB", "Hb"]},
+    {"name": "Hematocrit", "category": "COMPLETE BLOOD COUNT", "unit": "%", "aliases": ["Haematocrit", "HCT", "PCV"]},
+    {"name": "MCV", "category": "COMPLETE BLOOD COUNT", "unit": "fl", "aliases": []},
+    {"name": "MCH", "category": "COMPLETE BLOOD COUNT", "unit": "pg", "aliases": []},
+    {"name": "MCHC", "category": "COMPLETE BLOOD COUNT", "unit": "g/dL", "aliases": []},
+    {"name": "Platelets", "category": "COMPLETE BLOOD COUNT", "unit": "x10^9/L", "aliases": ["Platelet", "Platelet Count", "PLT"]},
+    {"name": "RDW-CV", "category": "COMPLETE BLOOD COUNT", "unit": "%", "aliases": ["RDW CV", "RDWCV"]},
 
-    {"test_name": "Neutrophils", "section": "Differential White Cell Count", "unit": "x10^9/L", "aliases": ["Neutrophils (%)", "Neutrophil", "NEUT"]},
-    {"test_name": "Lymphocytes", "section": "Differential White Cell Count", "unit": "x10^9/L", "aliases": ["Lymphocytes (%)", "Lymphocyte", "LYMPH"]},
-    {"test_name": "Monocytes", "section": "Differential White Cell Count", "unit": "x10^9/L", "aliases": ["Monocytes (%)", "Monocyte", "MONO"]},
-    {"test_name": "Eosinophils", "section": "Differential White Cell Count", "unit": "x10^9/L", "aliases": ["Eosinophils (%)", "Eosinophil", "EOS"]},
-    {"test_name": "Basophils", "section": "Differential White Cell Count", "unit": "x10^9/L", "aliases": ["Basophils (%)", "Basophil", "BASO"]},
+    {"name": "Neutrophils", "category": "Differential White Cell Count", "unit": "x10^9/L", "aliases": ["Neutrophils (%)", "Neutrophil", "NEUT"]},
+    {"name": "Lymphocytes", "category": "Differential White Cell Count", "unit": "x10^9/L", "aliases": ["Lymphocytes (%)", "Lymphocyte", "LYMPH"]},
+    {"name": "Monocytes", "category": "Differential White Cell Count", "unit": "x10^9/L", "aliases": ["Monocytes (%)", "Monocyte", "MONO"]},
+    {"name": "Eosinophils", "category": "Differential White Cell Count", "unit": "x10^9/L", "aliases": ["Eosinophils (%)", "Eosinophil", "EOS"]},
+    {"name": "Basophils", "category": "Differential White Cell Count", "unit": "x10^9/L", "aliases": ["Basophils (%)", "Basophil", "BASO"]},
 
-    {"test_name": "Blood Group", "section": "COMPLETE BLOOD COUNT", "kind": "text", "aliases": ["Blood Type", "ABO Rh", "ABO Group"]},
+    {"name": "Blood Group", "category": "COMPLETE BLOOD COUNT", "kind": "text", "aliases": ["Blood Type", "ABO Rh", "ABO Group"]},
 
-    {"test_name": "PT (Sec)", "section": "Prothrombin Time", "unit": "seconds", "aliases": ["PT (Seconds)", "PT Sec", "PT (s)"]},
-    {"test_name": "PT (INR)", "section": "Prothrombin Time", "unit": "INR", "aliases": ["PT INR"]},
-    {"test_name": "aPTT", "section": "Prothrombin Time", "unit": "seconds", "aliases": ["APTT", "PTT"]},
+    {"name": "PT (Sec)", "category": "Prothrombin Time", "unit": "seconds", "aliases": ["PT (Seconds)", "PT Sec", "PT (s)"]},
+    {"name": "PT (INR)", "category": "Prothrombin Time", "unit": "INR", "aliases": ["PT INR"]},
+    {"name": "aPTT", "category": "Prothrombin Time", "unit": "seconds", "aliases": ["APTT", "PTT"]},
 
-    {"test_name": "AST", "section": "LIVER FUNCTIONS", "unit": "U/L", "aliases": ["AST (SGOT)", "SGOT"]},
-    {"test_name": "ALT", "section": "LIVER FUNCTIONS", "unit": "U/L", "aliases": ["ALT (SGPT)", "SGPT"]},
+    {"name": "AST", "category": "LIVER FUNCTIONS", "unit": "U/L", "aliases": ["AST (SGOT)", "SGOT"]},
+    {"name": "ALT", "category": "LIVER FUNCTIONS", "unit": "U/L", "aliases": ["ALT (SGPT)", "SGPT"]},
 
-    {"test_name": "Urea", "section": "RENAL FUNCTIONS", "unit": "mg/dL", "aliases": ["Blood Urea"]},
-    {"test_name": "Creatinine", "section": "RENAL FUNCTIONS", "unit": "mg/dL", "aliases": ["Serum Creatinine", "Creat"]}
+    {"name": "Urea", "category": "RENAL FUNCTIONS", "unit": "mg/dL", "aliases": ["Blood Urea"]},
+    {"name": "Creatinine", "category": "RENAL FUNCTIONS", "unit": "mg/dL", "aliases": ["Serum Creatinine", "Creat"]}
   ]
 }

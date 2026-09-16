@@ -1,12 +1,15 @@
 """Tests for saving lab reports to MySQL/MariaDB.
 
-The row mapping and the /lab-reports endpoints run without a database (the
-queries are stubbed). One round-trip test uses the real database named in
-.env; it is opt-in (``OCR_TEST_DB=1``) and deletes what it writes.
+Results are stored as JSON on the report row, so the storage test is a
+round-trip through that column. The /lab-reports endpoints run without a
+database (the queries are stubbed). One round-trip test uses the real
+database named in .env; it is opt-in (``OCR_TEST_DB=1``) and deletes what it
+writes.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from decimal import Decimal
@@ -21,35 +24,81 @@ from ocr_service.tests.test_lab_results import EXPECTED
 requires_db = pytest.mark.skipif(not os.getenv("OCR_TEST_DB"), reason="set OCR_TEST_DB=1 to use the real database")
 
 
-def _as_fetched(row: tuple) -> dict:
-    """A result_rows() tuple as PyMySQL's DictCursor returns it (DECIMAL -> Decimal)."""
-    (position, test_name, percent, value, value_numeric, flag, unit, ref_range, section,
-     needs_review, review_notes, ocr_confidence) = row
-    dec = lambda v: None if v is None else Decimal(str(v))  # noqa: E731
-    return {"position": position, "test_name": test_name, "percent": dec(percent), "value": value,
-            "value_numeric": dec(value_numeric), "flag": flag, "unit": unit, "ref_range": ref_range,
-            "section": section, "needs_review": needs_review, "review_notes": review_notes,
-            "ocr_confidence": dec(ocr_confidence)}
-
-
-def test_rows_round_trip_to_the_exact_json_format() -> None:
-    """What goes into lab_results comes back out as the same JSON, key order included."""
-    rows = db.result_rows(EXPECTED, review=[])
-
-    back = [db.result_json(_as_fetched(row)) for row in rows]
+def test_results_round_trip_through_the_json_column() -> None:
+    """What is stored comes back identical -- key order and number types included."""
+    back = db._load(db._dump(EXPECTED), [])
 
     assert back == EXPECTED
     assert [list(r) for r in back] == [list(r) for r in EXPECTED]
+    platelets = next(r for r in back if r["name"] == "Platelets")
+    assert isinstance(platelets["value"], int)  # 744 does not become 744.0
+    blood_group = next(r for r in back if r["name"] == "Blood Group")
+    assert blood_group["value"] == "O Rh (D): Positive"  # text values stay text
 
 
-def test_result_rows_keep_text_values_and_review_state() -> None:
-    blood_group = next(r for r in EXPECTED if r["test_name"] == "Blood Group")
-    review = [{"needs_review": True, "confidence": 59.9, "notes": [{"code": "low_confidence", "params": {}}]}]
+def test_stored_json_keeps_unicode_as_characters() -> None:
+    """utf8mb4 columns hold the characters themselves, not \\uXXXX escapes."""
+    stored = db._dump([{"name": "Urea", "value": 5.2, "unit": "µmol/L"}])
 
-    [row] = db.result_rows([blood_group], review)
+    assert "µmol/L" in stored
+    assert db._load(stored, [])[0]["unit"] == "µmol/L"
 
-    assert row[3] == "O Rh (D): Positive" and row[4] is None  # value, value_numeric
-    assert row[9] == 1 and '"low_confidence"' in row[10] and row[11] == 59.9
+
+def test_load_tolerates_an_already_decoded_column() -> None:
+    """Some drivers decode JSON columns for you; MariaDB's LONGTEXT does not."""
+    assert db._load([{"name": "WBC"}], []) == [{"name": "WBC"}]
+    assert db._load(None, []) == []
+
+
+def test_needs_review_counts_only_flagged_results() -> None:
+    review = [{"needs_review": False}, {"needs_review": True}, {}, {"needs_review": True}]
+
+    assert db.count_needs_review(review) == 2
+    assert db.count_needs_review([]) == 0
+
+
+# --------------------------------------------------------------------------
+# Migration off the pre-JSON lab_results table
+# --------------------------------------------------------------------------
+
+
+def test_legacy_rows_become_the_json_format() -> None:
+    """A row of the dropped lab_results table maps back to the JSON record."""
+    row = {"test_name": "Neutrophils", "percent": Decimal("65.7"), "value": "7.15",
+           "value_numeric": Decimal("7.15"), "flag": "H", "unit": "x10^9/L",
+           "ref_range": "2 - 7", "section": "Differential White Cell Count"}
+
+    assert db._legacy_result_json(row) == {
+        "name": "Neutrophils", "percent": 65.7, "value": 7.15, "flag": "H",
+        "unit": "x10^9/L", "ref_range": "2 - 7", "category": "Differential White Cell Count",
+    }
+
+
+def test_legacy_text_values_keep_their_text() -> None:
+    row = {"test_name": "Blood Group", "percent": None, "value": "O Rh (D): Positive",
+           "value_numeric": None, "flag": None, "unit": None, "ref_range": None,
+           "section": "COMPLETE BLOOD COUNT"}
+
+    assert db._legacy_result_json(row)["value"] == "O Rh (D): Positive"
+
+
+def test_stored_results_rename_test_name_and_section() -> None:
+    """Reports saved before the rename come back under the current keys."""
+    old = [{"test_name": "Neutrophils", "percent": 65.7, "value": 7.15, "flag": "H",
+            "unit": "x10^9/L", "ref_range": "2 - 7", "section": "Differential White Cell Count"}]
+
+    [record] = db.rename_result_keys(old)
+
+    assert record == {"name": "Neutrophils", "percent": 65.7, "value": 7.15, "flag": "H",
+                      "unit": "x10^9/L", "ref_range": "2 - 7",
+                      "category": "Differential White Cell Count"}
+    # Re-emitted in the documented order, so a migrated row looks freshly saved.
+    assert list(record) == ["name", "percent", "value", "flag", "unit", "ref_range", "category"]
+
+
+def test_renaming_is_a_no_op_on_current_results() -> None:
+    assert db.rename_result_keys(EXPECTED) == EXPECTED
+    assert [list(r) for r in db.rename_result_keys(EXPECTED)] == [list(r) for r in EXPECTED]
 
 
 # --------------------------------------------------------------------------
@@ -125,7 +174,7 @@ def test_save_rejects_an_empty_or_malformed_body() -> None:
 @requires_db
 def test_save_and_read_back_from_mysql() -> None:
     report = {**BODY["report"], "patient_code": f"TEST-{uuid.uuid4().hex[:10]}"}
-    review = [{"needs_review": r["test_name"] == "Platelets", "notes": [], "confidence": 90.0} for r in EXPECTED]
+    review = [{"needs_review": r["name"] == "Platelets", "notes": [], "confidence": 90.0} for r in EXPECTED]
 
     saved = db.save_report(report=report, results=EXPECTED, review=review, filename="t.pdf", engine="surya")
     try:
@@ -137,9 +186,11 @@ def test_save_and_read_back_from_mysql() -> None:
         assert again["replaced"] == saved["id"]
 
         stored = db.get_report(again["id"])
-        assert stored["results"] == EXPECTED
+        assert stored["results"] == EXPECTED  # byte-for-byte the format /ocr returned
+        assert [list(r) for r in stored["results"]] == [list(r) for r in EXPECTED]  # key order too
+        assert stored["review"] == review
         assert stored["collected_at"] == "2026-01-01T08:00:00"
-        assert db.get_report(saved["id"]) is None  # replaced, results cascaded away
+        assert db.get_report(saved["id"]) is None  # replaced report is gone
     finally:
         with db.connect() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM lab_reports WHERE patient_code = %s", (report["patient_code"],))

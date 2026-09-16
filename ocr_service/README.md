@@ -181,13 +181,13 @@ language in `OCR_EXPECTED_LANGS` to be present.
 
 | Query param | Default | Notes |
 | --- | --- | --- |
-| `lang` | `eng+fra` | Tesseract: any `+`-joined codes (`eng`, `fra`, `khm`, `eng+khm`, ...), validated against installed data. Surya: syntax-checked and echoed back, otherwise ignored. |
+| `lang` | `eng+fra+khm` | The three languages these reports are in. Tesseract: any `+`-joined codes, validated against installed data. Surya: syntax-checked and echoed back, otherwise ignored — it reads every script it knows regardless. |
 | `detail` | `false` | Include per-word boxes and confidences. |
 | `dpi` | `300` | PDF rasterisation DPI, 72–600. Ignored for images. |
 | `lab` | `false` | Also extract structured lab results into `lab` — see [Lab results](#lab-results). |
 
 ```bash
-curl -F "file=@form.pdf" "http://localhost:8000/ocr?lang=eng+fra&detail=true"
+curl -F "file=@form.pdf" "http://localhost:8000/ocr?lang=eng+fra+khm&detail=true"
 ```
 
 Response:
@@ -197,7 +197,7 @@ Response:
   "filename": "form.pdf",
   "media_type": "application/pdf",
   "engine": "surya",                   // or "tesseract"
-  "lang": "eng+fra",
+  "lang": "eng+fra+khm",
   "page_count": 2,
   "languages": [                       // document-level, averaged over pages
     { "lang": "fra", "iso639_1": "fr", "confidence": 0.87 },
@@ -270,12 +270,12 @@ exactly the format the lab system inserts:
 {
   "lab": {
     "results": [
-      { "test_name": "RBC", "value": 5.31, "flag": "H", "unit": "x10^12/L",
-        "ref_range": "3.8 - 4.8", "section": "COMPLETE BLOOD COUNT" },
-      { "test_name": "Neutrophils", "percent": 65.7, "value": 7.15, "flag": "H",   // percent: differential rows only
-        "unit": "x10^9/L", "ref_range": "2 - 7", "section": "Differential White Cell Count" },
-      { "test_name": "Blood Group", "value": "O Rh (D): Positive", "flag": null,
-        "unit": null, "ref_range": null, "section": "COMPLETE BLOOD COUNT" }
+      { "name": "RBC", "value": 5.31, "flag": "H", "unit": "x10^12/L",
+        "ref_range": "3.8 - 4.8", "category": "COMPLETE BLOOD COUNT" },
+      { "name": "Neutrophils", "percent": 65.7, "value": 7.15, "flag": "H",   // percent: differential rows only
+        "unit": "x10^9/L", "ref_range": "2 - 7", "category": "Differential White Cell Count" },
+      { "name": "Blood Group", "value": "O Rh (D): Positive", "flag": null,
+        "unit": null, "ref_range": null, "category": "COMPLETE BLOOD COUNT" }
     ],
     "review": [                         // review[i] describes results[i]
       { "page": 1, "confidence": 100.0, "source": "RBC 5.31 H x1012/L 3.8 - 4.8",
@@ -289,7 +289,7 @@ exactly the format the lab system inserts:
 
 On the lab's two-page CBC / coagulation / biochemistry report this reproduces
 the reference JSON exactly — 22 records, same values, number types, key order
-and sections. Insert `results[i]` only when `review[i].needs_review` is false,
+and categories. Insert `results[i]` only when `review[i].needs_review` is false,
 or after a person has checked it against the document.
 
 **How rows are read.** Word boxes are regrouped into visual rows (both
@@ -302,12 +302,12 @@ normalised (`x10⁹/L`, OCR's flattened `x109/L` → `x10^9/L`), numbers are typ
 phone photo a 1–2° tilt drops a row's unit and range a full line below its
 name.
 
-**Test catalog** (`lab_catalog.json`). Canonical `test_name`, `section` and
+**Test catalog** (`lab_catalog.json`). Canonical `name`, `category` and
 unit per test, plus aliases (`Haemoglobin`, `HGB`, `Neutrophils (%)`, ...).
 Sections follow the catalog because the report's own headings do not map
 one-to-one onto the database groups (AST/ALT sit under "Transaminase" on the
 report but belong to LIVER FUNCTIONS). Tests not in the catalog are still
-extracted, with the nearest heading as their section; add them to the catalog
+extracted, with the nearest heading as their category; add them to the catalog
 to control their names. Deliberately **not** an alias: BUN for Urea (urea ≈
 BUN × 2.14 — a different number).
 
@@ -349,23 +349,75 @@ patient's name and address are deliberately not extracted or stored.
 | `GET /lab-reports?limit=20` | Recently saved reports (header and counts). |
 | `GET /lab-reports/{id}` | One report, `results` in exactly the JSON format above, plus per-result `review`. |
 
-Tables (`schema.sql`, created on first use in the database named by
-`OCR_DB_NAME`):
+One table (`schema.sql`, created on first use in the database named by
+`OCR_DB_NAME`): **`lab_reports`**, one row per saved report, unique on
+`(patient_code, sample_no)`. The header is columns — `patient_code`,
+`sample_no`, `collected_at`, `received_at`, `source_filename`, `engine`,
+`results_count`, `needs_review_count`, `created_at` — and the results
+themselves are two JSON columns:
 
-* `lab_reports` — one row per saved report; unique on `(patient_code, sample_no)`.
-* `lab_results` — one row per result: `test_name`, `percent`, `value` (as
-  reported, text), `value_numeric` (when it is a number, for queries), `flag`,
-  `unit`, `ref_range`, `section`, plus `needs_review`, `review_notes` (JSON)
-  and `ocr_confidence`. Deleting a report deletes its results.
+* `results` — `lab.results` exactly as `/ocr?lab=true` returned it.
+* `review` — `lab.review`, where `review[i]` describes `results[i]`.
 
-Results that still need review are saved with `needs_review = 1` (the web UI
-asks before saving them), so they can be found later:
+Storing the array rather than a row per test means what comes back out of
+`GET /lab-reports/{id}` is the format the API produced, key order and number
+types included: `744` is still an int, `"O Rh (D): Positive"` is still text.
+There is no column mapping to drift. The price is that a result is not a row,
+so aggregate queries go through `JSON_TABLE` instead of a plain `WHERE`.
+
+Cheap things stay cheap — the per-report counts are real columns, and single
+fields need no join:
 
 ```sql
-SELECT r.patient_code, r.sample_no, x.test_name, x.value, x.review_notes
-FROM lab_results x JOIN lab_reports r ON r.id = x.report_id
-WHERE x.needs_review = 1;
+SELECT patient_code, sample_no, results_count, needs_review_count,
+       JSON_VALUE(results, '$[0].name') AS first_test
+FROM lab_reports
+WHERE needs_review_count > 0;
 ```
+
+To query across individual results, expand the arrays. `FOR ORDINALITY` is
+what pairs a result with its review entry, since `review[i]` describes
+`results[i]`:
+
+```sql
+SELECT r.patient_code, r.sample_no, x.name, x.value, v.notes
+FROM lab_reports r
+JOIN JSON_TABLE(r.results, '$[*]' COLUMNS (
+       seq       FOR ORDINALITY,
+       name      VARCHAR(128) PATH '$.name',
+       value     VARCHAR(255) PATH '$.value'
+     )) x
+JOIN JSON_TABLE(r.review, '$[*]' COLUMNS (
+       seq          FOR ORDINALITY,
+       needs_review INT  PATH '$.needs_review',
+       notes        JSON PATH '$.notes'
+     )) v ON v.seq = x.seq
+WHERE v.needs_review = 1;
+```
+
+Results that still need review are saved with `needs_review: true` in
+`review` (the web UI asks before saving them) and counted in
+`needs_review_count`, so the query above finds them later.
+
+**Upgrading an existing database.** Results used to live in a separate
+`lab_results` table, one row per test. `db.py` folds those rows into
+`lab_reports.results` on first use and then drops the table — no manual step,
+and it only touches reports whose `results` is still `NULL`, so it cannot
+overwrite newer JSON. If the service's database user lacks `DROP` (the
+least-privilege `ocr_app` does), the data is still migrated and a warning
+names the leftover table; remove it as an admin:
+
+```sql
+DROP TABLE lab_results;
+```
+
+**Renamed keys.** A result's `test_name` is now `name` and its `section` is
+now `category`. Reports saved under the old names are rewritten on first use
+(`rename_result_keys`), keys re-emitted in the documented order so a migrated
+row is indistinguishable from a freshly saved one. The rename reaches the
+whole chain — `lab_catalog.json`, the `/ocr?lab=true` response, the
+`POST /lab-reports` body and the `ocr-site` frontend — so an older client
+reading `test_name` sees `undefined`.
 
 **On this machine** the database is the `ocr` schema on the local MariaDB
 12.3 service, reached as a dedicated user `ocr_app` that has rights on `ocr.*`
@@ -569,7 +621,7 @@ neither a GPU nor the Surya models: the Surya mapping and request path are
 tested against fake predictions. The Tesseract end-to-end tests skip
 themselves when the binary is missing — 5 skips is the normal result on a
 Surya-only machine, not a failure. Lab extraction is tested on a synthetic
-page with the report's layout (`test_lab_results.py`). 67 tests, ~5 s.
+page with the report's layout (`test_lab_results.py`). 73 tests, ~5 s.
 Opt-in tests
 against real resources:
 

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 # --------------------------------------------------------------------------
 
-DEFAULT_LANG = "eng+fra"
+DEFAULT_LANG = "eng+fra+khm"
 LANG_RE = re.compile(r"^[a-z]{3,4}(?:_[a-z]+)?(?:\+[a-z]{3,4}(?:_[a-z]+)?)*$", re.I)
 
 # Language data the deployment is expected to ship.  /health turns `ready`

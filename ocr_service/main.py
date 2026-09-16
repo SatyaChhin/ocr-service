@@ -138,7 +138,7 @@ class LabReportHeader(BaseModel):
 class LabExtraction(BaseModel):
     report: LabReportHeader = Field(description="Links the results to a patient and sample")
     results: list[dict[str, Any]] = Field(description=(
-        "Database-ready records: test_name, [percent], value, flag, unit, ref_range, section. "
+        "Database-ready records: name, [percent], value, flag, unit, ref_range, category. "
         "`percent` is present only on differential rows."
     ))
     review: list[LabReview] = Field(description="review[i] describes results[i]")
@@ -161,13 +161,13 @@ class OcrResponse(BaseModel):
 class LabResultIn(BaseModel):
     """One record of ``lab.results``, as returned by /ocr?lab=true."""
 
-    test_name: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=128)
     percent: float | None = None
     value: int | float | str
     flag: str | None = Field(None, max_length=4)
     unit: str | None = Field(None, max_length=32)
     ref_range: str | None = Field(None, max_length=64)
-    section: str | None = Field(None, max_length=128)
+    category: str | None = Field(None, max_length=128)
 
 
 class SaveLabReport(BaseModel):
@@ -458,7 +458,7 @@ def _process(data: bytes, media_type: str, lang: str, detail: bool, dpi: int, la
 async def extract_text(
     request: Request,
     file: UploadFile = File(..., description="PNG, JPEG, WEBP or PDF"),
-    lang: str = Query(ocr.DEFAULT_LANG, description="Tesseract language spec, e.g. 'eng+fra'"),
+    lang: str = Query(ocr.DEFAULT_LANG, description="Tesseract language spec, e.g. 'eng+fra+khm'"),
     detail: bool = Query(False, description="Include per-word boxes and confidences"),
     dpi: int = Query(
         pdf_utils.DEFAULT_DPI,
