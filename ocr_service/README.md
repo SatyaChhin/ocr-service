@@ -144,9 +144,14 @@ instead of failing.
 
 ```powershell
 .\run.ps1                          # http://localhost:8000, Surya
-.\run.ps1 -Port 8080 -Reload
+.\run.ps1 -Port 8001 -Reload
 .\run.ps1 -Engine tesseract        # the fallback engine
 ```
+
+Port 8000 is taken by a PHP app on this machine, so run the service on
+**8001** (`.\run.ps1 -Port 8001`) — that is the port the `ocr-site` frontend's
+git-ignored `.env` points `NUXT_OCR_API_BASE` at. The default stays 8000
+everywhere else; only the local `.env` files override it.
 
 Check `GET /health` first — `"ready": true` means the active engine is loaded
 (for Tesseract: found, with all expected languages).
@@ -548,7 +553,7 @@ The suite runs with `OCR_ENGINE=tesseract` (set in `conftest.py`) and needs
 neither a GPU nor the Surya models: the Surya mapping and request path are
 tested against fake predictions. Tesseract end-to-end tests skip themselves
 when the binary is missing. Lab extraction is tested on a synthetic page with
-the report's layout (`test_lab_results.py`). 63 tests, ~5 s. Opt-in tests
+the report's layout (`test_lab_results.py`). 67 tests, ~5 s. Opt-in tests
 against real resources:
 
 ```bash
