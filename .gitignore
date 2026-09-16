@@ -29,10 +29,9 @@ htmlcov/
 .env.*
 !.env.example
 
-# --- Tesseract language data ---
-# Third-party binary blobs (~26 MB) from tesseract-ocr/tessdata.
-# run.ps1 points TESSDATA_PREFIX here -- see ocr_service/README.md to download.
-# Delete this line if you would rather vendor them for a one-step checkout.
+# --- Leftover from the removed Tesseract fallback ---
+# Not used any more; ignored so an old working copy does not commit ~26 MB
+# of language data. Safe to delete the directory.
 tessdata/
 
 # --- Editors / OS ---
