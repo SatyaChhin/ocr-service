@@ -48,11 +48,13 @@ the container image.
 | --- | --- | --- |
 | NVIDIA GPU + driver | Surya on CUDA (it falls back to CPU, which is far slower) | `nvidia-smi` |
 | `poppler-utils` | `pdfinfo` / `pdftoppm`, used to rasterise PDF pages | `pdftoppm -v` |
-| `tesseract-ocr` | fallback engine that `pytesseract` shells out to | `tesseract --version` |
-| `tesseract-ocr-eng` / `-fra` / `-khm` | language data for the fallback engine | `tesseract --list-langs` |
+| `tesseract-ocr` *(optional)* | fallback engine that `pytesseract` shells out to | `tesseract --version` |
+| `tesseract-ocr-eng` / `-fra` / `-khm` *(optional)* | language data for the fallback engine | `tesseract --list-langs` |
 
-Tesseract is optional while `OCR_ENGINE=surya`; `/health` reports its status
-either way.
+**Surya is the engine this service runs on.** Tesseract is an optional
+fallback, kept for comparison and for machines without a GPU — skip it and
+everything above still works. `/health` reports its status either way, so a
+`tesseract` entry reading `not found` there is expected, not a fault.
 
 **Debian / Ubuntu**
 
@@ -137,15 +139,11 @@ thread: `/health` answers immediately with `engine.state: "loading"` and
 `ready: false`, and an `/ocr` request that arrives early waits for the load
 instead of failing.
 
-**On this machine**, Tesseract is installed but not on `PATH`, and its `fra` /
-`khm` language data lives in a project-local `tessdata/` directory because
-`C:\Program Files\Tesseract-OCR\tessdata` is not writable without admin.
-`run.ps1` sets `TESSERACT_CMD` and `TESSDATA_PREFIX` for you:
+`run.ps1` starts the service on Surya:
 
 ```powershell
-.\run.ps1                          # http://localhost:8000, Surya
-.\run.ps1 -Port 8001 -Reload
-.\run.ps1 -Engine tesseract        # the fallback engine
+.\run.ps1 -Port 8001                 # http://localhost:8001, Surya
+.\run.ps1 -Port 8001 -Reload         # auto-reload while editing
 ```
 
 Port 8000 is taken by a PHP app on this machine, so run the service on
@@ -153,8 +151,25 @@ Port 8000 is taken by a PHP app on this machine, so run the service on
 git-ignored `.env` points `NUXT_OCR_API_BASE` at. The default stays 8000
 everywhere else; only the local `.env` files override it.
 
-Check `GET /health` first — `"ready": true` means the active engine is loaded
-(for Tesseract: found, with all expected languages).
+Check `GET /health` first — `"ready": true` means the active engine is
+loaded. Surya loads its models in a background thread, so expect
+`engine.state: "loading"` for the first ~5–15 s after startup.
+
+<details>
+<summary>Using the Tesseract fallback (not needed for normal use)</summary>
+
+```powershell
+.\run.ps1 -Port 8001 -Engine tesseract
+```
+
+On this machine Tesseract is installed but not on `PATH`, and its `fra` /
+`khm` language data lives in a project-local `tessdata/` directory because
+`C:\Program Files\Tesseract-OCR\tessdata` is not writable without admin.
+`run.ps1` sets `TESSERACT_CMD` and `TESSDATA_PREFIX` for you, so the fallback
+works without an elevated shell. For Tesseract, `ready` also requires every
+language in `OCR_EXPECTED_LANGS` to be present.
+
+</details>
 
 ---
 
@@ -551,9 +566,11 @@ pytest ocr_service/tests -v      # from the directory containing ocr_service/
 
 The suite runs with `OCR_ENGINE=tesseract` (set in `conftest.py`) and needs
 neither a GPU nor the Surya models: the Surya mapping and request path are
-tested against fake predictions. Tesseract end-to-end tests skip themselves
-when the binary is missing. Lab extraction is tested on a synthetic page with
-the report's layout (`test_lab_results.py`). 67 tests, ~5 s. Opt-in tests
+tested against fake predictions. The Tesseract end-to-end tests skip
+themselves when the binary is missing — 5 skips is the normal result on a
+Surya-only machine, not a failure. Lab extraction is tested on a synthetic
+page with the report's layout (`test_lab_results.py`). 67 tests, ~5 s.
+Opt-in tests
 against real resources:
 
 ```bash
