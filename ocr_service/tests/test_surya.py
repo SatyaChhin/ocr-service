@@ -9,14 +9,13 @@ and a CUDA device.
 from __future__ import annotations
 
 import os
-from types import SimpleNamespace
 
 import cv2
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from ocr_service import engines, ocr, surya_engine
+from ocr_service import ocr, surya_engine
 from ocr_service.main import app
 from ocr_service.tests.conftest import fake_char as _char
 from ocr_service.tests.conftest import fake_chars_for as _chars_for
