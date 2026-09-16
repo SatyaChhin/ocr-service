@@ -18,23 +18,13 @@ from fastapi.testclient import TestClient
 
 from ocr_service import engines, ocr, surya_engine
 from ocr_service.main import app
+from ocr_service.tests.conftest import fake_char as _char
+from ocr_service.tests.conftest import fake_chars_for as _chars_for
+from ocr_service.tests.conftest import fake_line as _line
 
 requires_surya_models = pytest.mark.skipif(
     not os.getenv("OCR_TEST_SURYA"), reason="set OCR_TEST_SURYA=1 to run Surya on real models"
 )
-
-
-def _char(text: str, x0: float, x1: float, conf: float = 0.9, valid: bool = True, y0: float = 10, y1: float = 30):
-    return SimpleNamespace(text=text, bbox=[x0, y0, x1, y1], confidence=conf, bbox_valid=valid)
-
-
-def _line(text: str, bbox: list[float], chars: list | None = None):
-    return SimpleNamespace(text=text, bbox=bbox, chars=chars or [])
-
-
-def _chars_for(text: str, x: float, y0: float, y1: float, conf: float = 0.9) -> list:
-    """One fake character per letter, 10 px wide, starting at ``x``."""
-    return [_char(ch, x + 10 * i, x + 10 * i + 9, conf, y0=y0, y1=y1) for i, ch in enumerate(text)]
 
 
 # --------------------------------------------------------------------------
@@ -114,26 +104,6 @@ def test_build_page_numbers_words_by_row() -> None:
 # --------------------------------------------------------------------------
 
 
-@pytest.fixture
-def fake_surya(monkeypatch: pytest.MonkeyPatch) -> list:
-    """Route /ocr through the Surya engine with canned predictions."""
-    calls: list = []
-    lines = [
-        _line("Hemoglobin", [40, 40, 140, 62], _chars_for("Hemoglobin", 40, 40, 62, 0.95)),
-        _line("9.7", [300, 41, 330, 63], _chars_for("9.7", 300, 41, 63, 0.5)),
-    ]
-
-    def recognition(images, **kwargs):
-        calls.append((images, kwargs))
-        return [SimpleNamespace(text_lines=lines, image_bbox=[0, 0, *images[0].size])]
-
-    monkeypatch.setattr(engines, "ENGINE_NAME", "surya")
-    monkeypatch.setattr(engines, "warm_up", lambda: None)  # no background load at startup
-    monkeypatch.setattr(surya_engine, "_load", lambda: (recognition, object()))
-    monkeypatch.setattr(surya_engine, "_state", "ready")
-    return calls
-
-
 def _png(width: int = 400, height: int = 120) -> bytes:
     ok, buffer = cv2.imencode(".png", np.full((height, width, 3), 255, dtype=np.uint8))
     assert ok
@@ -170,7 +140,6 @@ def test_health_reports_the_active_engine(fake_surya: list) -> None:
     assert body["engine"]["name"] == "surya"
     assert body["engine"]["uses_language_hints"] is False
     assert body["ready"] is True
-    assert "available" in body["tesseract"]  # fallback status still reported
 
 
 def test_prepare_downscales_only_oversized_pages(monkeypatch: pytest.MonkeyPatch) -> None:

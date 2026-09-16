@@ -10,13 +10,13 @@
 #   pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
 #
 # System packages are NOT installable from here -- see README.md for the
-# tesseract-ocr (fallback engine) and poppler-utils prerequisites.
+# poppler-utils prerequisite.
 
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 
-# --- Surya (default engine) ---
+# --- Surya (the OCR engine) ---
 # 0.17.x is the last in-process release; 0.20+ needs a separate vLLM or
 # llama.cpp server and returns block-level text without word boxes.
 surya-ocr==0.17.1
@@ -27,9 +27,6 @@ torchvision==0.26.0
 transformers==4.57.6
 # Imported by surya.common.s3 for the model download but not declared.
 requests==2.34.2
-
-# --- Tesseract (fallback engine, OCR_ENGINE=tesseract) ---
-pytesseract==0.3.13
 
 # surya-ocr pins pillow<11 and this exact OpenCV build.
 pillow==10.4.0

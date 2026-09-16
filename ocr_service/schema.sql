@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS lab_reports (
   collected_at       DATETIME     NULL,
   received_at        DATETIME     NULL,
   source_filename    VARCHAR(255) NULL,
-  engine             VARCHAR(16)  NOT NULL COMMENT 'surya | tesseract',
+  engine             VARCHAR(16)  NOT NULL COMMENT 'OCR engine that read the report, e.g. surya',
   results_count      INT UNSIGNED NOT NULL,
   needs_review_count INT UNSIGNED NOT NULL COMMENT 'results a person should check against the document',
   results            JSON         NOT NULL COMMENT 'lab.results: [{name, percent?, value, flag, unit, ref_range, category}]',

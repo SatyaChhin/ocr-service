@@ -69,7 +69,7 @@ _PERCENT = re.compile(rf"^(?P<percent>{_NUM})\s*%\s+{_TAIL}")
 _PERCENT_NO_SIGN = re.compile(rf"^(?P<percent>{_NUM})\s*%?\s+{_TAIL}")
 
 # Dot leaders between a test name and its value: "WBC .......... 10.88".
-# Tesseract reads them as runs of dots and dashes ("-.- .----"); a range's
+# OCR reads them as runs of dots and dashes ("-.- .----"); a range's
 # single " - " never has three in a row.
 _LEADERS = re.compile(r"(?:\s*[.·•…_\-‹›,]){3,}")
 _KHMER = re.compile(r"[ក-៿]")
@@ -363,9 +363,9 @@ def _is_heading(text: str) -> bool:
 def rows_from_page(page: dict[str, Any]) -> list[Row]:
     """Rebuild the page's visual rows from its word boxes.
 
-    Works the same for both engines -- Tesseract can put a table's name and
-    value columns in different blocks, which its own line numbering would
-    keep apart. Falls back to the page text when words were not returned.
+    The engine can put a table's name and value columns in different blocks,
+    which its own line numbering would keep apart. Falls back to the page
+    text when words were not returned.
     """
     words = page.get("words")
     if not words:

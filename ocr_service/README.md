@@ -1,33 +1,30 @@
 # OCR Service
 
 FastAPI service that extracts text from scanned forms, photographed documents
-and PDFs. Two engines sit behind the same API:
-
-| `OCR_ENGINE` | Engine | Notes |
-| --- | --- | --- |
-| `surya` *(default)* | [Surya](https://github.com/datalab-to/surya) 0.17.1, in-process PyTorch on the GPU | Reads every script it knows at once, Khmer included — no language hint. |
-| `tesseract` | Tesseract 5 with `eng`/`fra`/`khm` data | CPU. Needs `lang` (e.g. `eng+khm`). Kept as a fallback and for comparison. |
+and PDFs, using [Surya](https://github.com/datalab-to/surya) 0.17.1 — an
+in-process PyTorch model on the GPU. It reads every script it knows at once,
+Khmer included, so there is no language to choose.
 
 Built for medical-style forms: OCR output keeps a label and its value on one
 line, and `?detail=true` returns per-word bounding boxes and confidences you
-can build key-value or table extraction on top of. Responses have the same
-shape whichever engine ran; the `engine` field says which one did.
+can build key-value or table extraction on top of.
 
-### Surya vs Tesseract on this service's test pages
+### Accuracy on this service's test pages
 
-| | Surya (RTX 5080 Laptop) | Tesseract |
-| --- | --- | --- |
-| Clean 900×200 PNG, "Hello from the OCR service / Invoice total: 1234.56" | exact, ~0.9 s | first letter of each line lost (upscaling in the preprocessing), ~0.8 s |
-| Synthetic A4 lab report (English, 104 words) | exact rows, 93% mean conf, ~2.6 s | `2F/55` for `F / 55`, `x10412/L` for `x10^12/L` |
-| Bilingual Khmer/English form | 94% conf; 3 Khmer character errors, incl. age `៥៥` → `៥៤` | 61% conf; bold Khmer headings read as Latin gibberish |
+| Page | Result (RTX 5080 Laptop) |
+| --- | --- |
+| Clean 900×200 PNG, "Hello from the OCR service / Invoice total: 1234.56" | exact, ~0.9 s |
+| Synthetic A4 lab report (English, 104 words) | exact rows, 93% mean confidence, ~2.6 s |
+| Bilingual Khmer/English form | 94% confidence; 3 Khmer character errors, incl. age `៥៥` → `៥៤` |
 
-Surya is far better on these pages but not error-free — it misread a Khmer
-digit in a patient's age. Treat the Low-confidence review as a hint, not a
-guarantee: that digit was read with high confidence.
+Good, but not error-free — it misread a Khmer digit in a patient's age.
+Treat the low-confidence review as a hint, not a guarantee: that digit was
+read with high confidence.
 
-**Confidence is not comparable across engines.** Surya's is the model's
-token probability (0–100 here); it scores **bold** text noticeably lower even
-when it is read correctly.
+**Confidence is the model's token probability** (0–100 here). It scores
+**bold** text noticeably lower even when it is read correctly, which is why
+a cross-checked value is trusted regardless of its score — see
+[Lab results](#lab-results).
 
 ### Licensing (Surya)
 
@@ -35,7 +32,7 @@ The Surya code is GPL-3.0. The model weights use a modified AI Pubs Open
 Rail-M licence: free for research, personal use, and organisations under
 $2M in funding/revenue; broader commercial use needs a licence from
 [Datalab](https://www.datalab.to/pricing). Check this before deploying
-commercially. Tesseract (Apache-2.0) has no such restriction.
+commercially.
 
 ---
 
@@ -48,37 +45,28 @@ the container image.
 | --- | --- | --- |
 | NVIDIA GPU + driver | Surya on CUDA (it falls back to CPU, which is far slower) | `nvidia-smi` |
 | `poppler-utils` | `pdfinfo` / `pdftoppm`, used to rasterise PDF pages | `pdftoppm -v` |
-| `tesseract-ocr` *(optional)* | fallback engine that `pytesseract` shells out to | `tesseract --version` |
-| `tesseract-ocr-eng` / `-fra` / `-khm` *(optional)* | language data for the fallback engine | `tesseract --list-langs` |
 
-**Surya is the engine this service runs on.** Tesseract is an optional
-fallback, kept for comparison and for machines without a GPU — skip it and
-everything above still works. `/health` reports its status either way, so a
-`tesseract` entry reading `not found` there is expected, not a fault.
+Surya needs no language data: it reads every script it knows without a hint.
 
 **Debian / Ubuntu**
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-fra \
-                        tesseract-ocr-khm poppler-utils
+sudo apt-get install -y poppler-utils
 ```
 
-**macOS (Homebrew)** — the `tesseract-lang` formula carries all language data:
+**macOS (Homebrew)**
 
 ```bash
-brew install tesseract tesseract-lang poppler
+brew install poppler
 ```
 
 **Windows**
 
-1. Install the [UB Mannheim Tesseract build](https://github.com/UB-Mannheim/tesseract/wiki),
-   ticking **French** and **Khmer** under "Additional language data" during setup.
-2. Download the [poppler for Windows](https://github.com/oschwartz10612/poppler-windows/releases)
+1. Download the [poppler for Windows](https://github.com/oschwartz10612/poppler-windows/releases)
    release and add its `Library\bin` directory to `PATH`.
-3. If either is not on `PATH`, point the service at it directly:
+2. If it is not on `PATH`, point the service at it directly:
    ```
-   set TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
    set OCR_POPPLER_PATH=C:\poppler\Library\bin
    ```
 
@@ -87,7 +75,6 @@ brew install tesseract tesseract-lang poppler
 ```dockerfile
 FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        tesseract-ocr tesseract-ocr-eng tesseract-ocr-fra tesseract-ocr-khm \
         poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
@@ -155,22 +142,6 @@ Check `GET /health` first — `"ready": true` means the active engine is
 loaded. Surya loads its models in a background thread, so expect
 `engine.state: "loading"` for the first ~5–15 s after startup.
 
-<details>
-<summary>Using the Tesseract fallback (not needed for normal use)</summary>
-
-```powershell
-.\run.ps1 -Port 8001 -Engine tesseract
-```
-
-On this machine Tesseract is installed but not on `PATH`, and its `fra` /
-`khm` language data lives in a project-local `tessdata/` directory because
-`C:\Program Files\Tesseract-OCR\tessdata` is not writable without admin.
-`run.ps1` sets `TESSERACT_CMD` and `TESSDATA_PREFIX` for you, so the fallback
-works without an elevated shell. For Tesseract, `ready` also requires every
-language in `OCR_EXPECTED_LANGS` to be present.
-
-</details>
-
 ---
 
 ## API
@@ -181,7 +152,7 @@ language in `OCR_EXPECTED_LANGS` to be present.
 
 | Query param | Default | Notes |
 | --- | --- | --- |
-| `lang` | `eng+fra+khm` | The three languages these reports are in. Tesseract: any `+`-joined codes, validated against installed data. Surya: syntax-checked and echoed back, otherwise ignored — it reads every script it knows regardless. |
+| `lang` | `eng+fra+khm` | Syntax-checked and echoed back on the response, otherwise **ignored**: Surya reads every script it knows without a hint. Kept so a client can record what it expected. |
 | `detail` | `false` | Include per-word boxes and confidences. |
 | `dpi` | `300` | PDF rasterisation DPI, 72–600. Ignored for images. |
 | `lab` | `false` | Also extract structured lab results into `lab` — see [Lab results](#lab-results). |
@@ -196,7 +167,7 @@ Response:
 {
   "filename": "form.pdf",
   "media_type": "application/pdf",
-  "engine": "surya",                   // or "tesseract"
+  "engine": "surya",
   "lang": "eng+fra+khm",
   "page_count": 2,
   "languages": [                       // document-level, averaged over pages
@@ -242,8 +213,8 @@ read left to right — Surya detects a form label and its value as separate
 lines, and its own sort can put the value first. For Surya words, `line` is
 that row number and `block`/`par` are always 1.
 
-**Language detection is best effort.** Tesseract will not tell you which of
-`eng+khm` it matched, so detection runs over the extracted text instead, from
+**Language detection is best effort.** The engine does not report which
+languages it read, so detection runs over the extracted text instead, from
 two signals:
 
 * **Khmer by script.** `langdetect` ships 55 profiles and Khmer is not one of
@@ -334,8 +305,7 @@ gets its own note. On the reference report that leaves one note — Platelets
 Measured on a simulated phone photo of the same report (tilted 1.3°, uneven
 light, blur, noise, JPEG 55): 20 of 22 records exact, and both errors flagged
 — `x10°/L` for `x10⁹/L`, and Basophils `0.2%` read as `0.296` (with
-`suggested: 0.2`). Tesseract reads only 13 of 22 from the clean PDF (it turns
-dot leaders and flags into noise), so use Surya for lab extraction.
+`suggested: 0.2`).
 
 ### Saving lab reports to MySQL
 
@@ -428,12 +398,10 @@ only (its password is in the git-ignored `ocr-service/.env`; see
 
 Always returns **200** so a liveness probe will not restart a running
 process. Use the `ready` boolean for readiness — it is false while Surya's
-models are loading, when the active engine failed to load, and (Tesseract)
-when an expected language is missing (`eng`, `fra`, `khm` by default — see
-`OCR_EXPECTED_LANGS`). `engine` describes the active engine (`name`, `state`,
-`version`, `device`, `device_name`, `uses_language_hints`); `tesseract`
-reports the fallback's status whichever engine is active. The body also
-reports the PDF backend in use and the configured limits.
+models are loading and when the engine failed to load. `engine` describes it
+(`name`, `state`, `version`, `device`, `device_name`, `uses_language_hints`).
+The body also reports the database, the PDF backend in use and the
+configured limits.
 
 ### Errors
 
@@ -446,90 +414,10 @@ Errors return `{"detail": "...", "request_id": "..."}` — never a stack trace.
 | `413` | Upload exceeds 25 MB |
 | `422` | Missing `file` part or out-of-range `dpi` |
 | `500` | Unexpected failure (details logged, not returned) |
-| `503` | OCR engine (Tesseract binary, or Surya models) or poppler unavailable |
+| `503` | OCR engine (Surya models) or poppler unavailable |
 
 File type is decided by **magic bytes**, not by the filename or the
 client-supplied `Content-Type`.
-
----
-
-## Tesseract preprocessing pipeline
-
-Applied to every page before Tesseract OCR (`ocr.preprocess`). Surya gets the
-page as-is (RGB, downscaled only past `OCR_SURYA_MAX_PIXELS`): it is a neural
-model trained on raw scans, and binarisation would only remove information.
-
-1. **Grayscale** — including a 4-channel alpha path.
-2. **Rescale** — upscale toward a 1600px long side (Tesseract is trained near
-   300 DPI and does poorly on small phone photos); downscale anything over 40
-   MP so one page cannot exhaust memory.
-3. **Denoise** — non-local-means below 4 MP, median blur above it. Non-local
-   means costs seconds per full-resolution page, which is untenable across 50
-   of them.
-4. **Deskew** — candidate rotations are scored by the sharpness of the
-   horizontal projection profile (coarse 1° sweep over ±12°, then a 0.2°
-   refinement). This is slower than reading an angle off `cv2.minAreaRect` but
-   avoids that function's sign ambiguity across OpenCV versions.
-5. **Strip table rules** — long horizontal/vertical lines are painted white.
-6. **Binarise** — illumination flattening followed by a global Otsu threshold.
-
-Steps 5 and 6 are not the obvious choices, so here is why.
-
-### Why not `cv2.adaptiveThreshold`
-
-Adaptive thresholding sets each pixel's threshold from its local mean. Next to
-a heavy black table rule that local mean is dragged down, so extra pixels flip
-to black and nearby characters thicken until they merge. On a bilingual
-medical form with a ruled medication table this cost **14 of 51 ground-truth
-tokens — the entire table read as nothing** — while reported confidence stayed
-above 90%, because the words that *were* read were read well.
-
-Flattening the illumination (divide by a heavily-blurred copy of the page,
-which captures the lighting field but not the glyphs) and then applying a
-single global Otsu threshold keeps the lighting invariance adaptive
-thresholding is chosen for, without touching stroke weight. Token recall on
-the same page under three lighting conditions:
-
-| method | mild gradient | heavy shadow | severe shadow | total |
-| --- | --- | --- | --- | --- |
-| **flatten + Otsu** (default) | 50/51 | 50/51 | 50/51 | **150/153** |
-| `cv2.adaptiveThreshold` 31/15 | 37/51 | 37/51 | 39/51 | 113/153 |
-| plain Otsu | 50/51 | 38/51 | 36/51 | 124/153 |
-
-Plain Otsu collapses under a hard shadow, which is exactly why adaptive
-thresholding gets recommended — the flattening step is what makes a global
-threshold safe. Set `OCR_BINARISE=adaptive` to restore the literal behaviour.
-
-The illumination field is estimated on a 512px copy and resized back. It is
-low-frequency by construction, so this differs from the full-resolution blur
-by a mean of 0.02/255, but blurring a 24 MP page directly needs a ~1100px
-kernel and took **24 seconds per page**.
-
-### Why strip table rules
-
-Independently of binarisation, Tesseract's layout analysis can classify a
-fully-bordered table as a non-text region and skip every cell in it — silently,
-in *every* page segmentation mode (3, 4, 6, 11 and 12 were all tested). Erasing
-the rules leaves the cell contents looking like ordinary text lines. On a form
-page whose medication table is fully boxed, token recall went **3/10 → 10/10**;
-on a form whose table was already read correctly it changed nothing.
-
-Rules are found by directional morphological opening. The kernel length is
-derived from the **median glyph height**, not from the page dimensions: a
-kernel shorter than a capital letter matches the letter's own stems and erases
-the glyph, which is a real failure on short pages or large type. Disable with
-`OCR_STRIP_RULES=0`.
-
-### Combined effect
-
-Token recall, same two documents, all four combinations:
-
-| | boxed table page | real bilingual form |
-| --- | --- | --- |
-| adaptive, rules kept *(the obvious build)* | 3/10 | 5/14 |
-| adaptive, rules stripped | 10/10 | 12/14 |
-| flatten+Otsu, rules kept | 3/10 | 14/14 |
-| **flatten+Otsu, rules stripped** *(shipped)* | **10/10** | **14/14** |
 
 ---
 
@@ -574,7 +462,7 @@ PyMuPDF (`fitz`), which rasterises fully in memory.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OCR_ENGINE` | `surya` | `surya` or `tesseract` |
+| `OCR_ENGINE` | `surya` | Only `surya`. Kept so an old value fails loudly at startup. |
 | `OCR_SURYA_MAX_PIXELS` | `20000000` | Pages above this are downscaled before Surya (bounds VRAM and time) |
 | `OCR_ROW_OVERLAP` | `0.5` | Vertical overlap (share of the shorter box) for two boxes to count as one row — Surya lines, and words in lab tables |
 | `OCR_SURYA_DESKEW_MIN_DEG` | `0.3` | Straighten Surya pages tilted by at least this many degrees |
@@ -586,7 +474,6 @@ PyMuPDF (`fitz`), which rasterises fully in memory.
 | `TORCH_DEVICE` | auto (`cuda` if available) | Surya setting: force `cpu` / `cuda` |
 | `MODEL_CACHE_DIR` | `%LOCALAPPDATA%\datalab\datalab\Cache\models` | Surya setting: where the weights are cached |
 | `RECOGNITION_BATCH_SIZE` / `DETECTOR_BATCH_SIZE` | Surya auto | Surya settings: lower them if the GPU runs out of memory |
-| `TESSERACT_CMD` | — | Path to `tesseract` if it is not on `PATH` |
 | `OCR_MAX_UPLOAD_BYTES` | `26214400` | Upload cap (25 MB) |
 | `OCR_MAX_PDF_PAGES` | `50` | Page cap for PDFs |
 | `OCR_MAX_CONCURRENCY` | `min(4, cpu_count)` | Documents OCR'd at once |
@@ -594,15 +481,8 @@ PyMuPDF (`fitz`), which rasterises fully in memory.
 | `OCR_PDF_TIMEOUT_S` | `120` | Per-page poppler timeout |
 | `OCR_POPPLER_PATH` | — | Directory holding `pdfinfo`/`pdftoppm` if not on `PATH` |
 | `OCR_PDF_TEMP_DIR` | — | Temp dir for the `pdf2image` fallback |
-| `OCR_TESSERACT_CONFIG` | `--oem 3 --psm 3` | Raw Tesseract flags |
-| `OCR_EXPECTED_LANGS` | `eng,fra,khm` | Languages `/health` requires before reporting `ready` |
 | `OCR_MIN_KHMER_RATIO` | `0.10` | Share of letters in the Khmer block before `khm` is reported |
 | `OCR_MIN_CHARS_FOR_LANGDETECT` | `40` | Latin characters needed before `langdetect` runs |
-| `OCR_DENOISE` | `auto` | `auto` / `nlmeans` / `fast` / `off` |
-| `OCR_BINARISE` | `flatten-otsu` | `flatten-otsu` / `adaptive` / `otsu` / `off` |
-| `OCR_STRIP_RULES` | `1` | `0` to keep table borders |
-| `OCR_ADAPTIVE_BLOCK` / `OCR_ADAPTIVE_C` | `31` / `15` | Window for `OCR_BINARISE=adaptive` |
-| `OCR_BACKGROUND_ESTIMATE_PX` | `512` | Resolution the illumination field is estimated at |
 | `OCR_MAX_DESKEW_DEG` | `12` | Deskew search range |
 | `OCR_LOG_LEVEL` | `INFO` | Log level |
 | `OCR_DEBUG` | — | `1` to log full tracebacks |
@@ -616,26 +496,15 @@ pip install -r requirements-dev.txt
 pytest ocr_service/tests -v      # from the directory containing ocr_service/
 ```
 
-The suite runs with `OCR_ENGINE=tesseract` (set in `conftest.py`) and needs
-neither a GPU nor the Surya models: the Surya mapping and request path are
-tested against fake predictions. The Tesseract end-to-end tests skip
-themselves when the binary is missing — 5 skips is the normal result on a
-Surya-only machine, not a failure. Lab extraction is tested on a synthetic
-page with the report's layout (`test_lab_results.py`). 73 tests, ~5 s.
-Opt-in tests
-against real resources:
+The suite needs neither a GPU nor the Surya models: the mapping and the whole
+request path run against canned predictions fed in at the predictor (the
+`fake_surya` fixture in `conftest.py`). Lab extraction is tested on a
+synthetic page with the report's layout (`test_lab_results.py`). 65 tests,
+a couple of seconds. Two skip unless you opt into the real resources:
 
 ```bash
 OCR_TEST_SURYA=1 pytest ocr_service/tests/test_surya.py   # Surya models (~15 s, needs the download)
 OCR_TEST_DB=1 pytest ocr_service/tests/test_db.py         # the database in .env; deletes what it writes
-```
-
-On Windows, if `fra.traineddata` / `khm.traineddata` cannot be written into
-`C:\Program Files\Tesseract-OCR\tessdata` (that needs an elevated shell), put
-the language files in a writable directory and point `TESSDATA_PREFIX` at it:
-
-```
-set TESSDATA_PREFIX=D:\path\to\tessdata
 ```
 
 ## Performance notes
@@ -643,15 +512,12 @@ set TESSDATA_PREFIX=D:\path\to\tessdata
 Both engines are blocking, so `/ocr` runs them via `run_in_threadpool` and
 an `asyncio.Semaphore` caps concurrent documents.
 
-**Surya** on an RTX 5080 Laptop GPU: ~0.9 s for a small image, ~2.6 s for a
-dense A4 page, ~2.4 GB VRAM. The first request or two after startup are
-slower while the GPU clocks up. Pages go through the GPU one at a time (a
-lock in `surya_engine`); PDF rendering of the next page still overlaps.
+On an RTX 5080 Laptop GPU: ~0.9 s for a small image, ~2.6 s for a dense A4
+page, ~2.4 GB VRAM. The first request or two after startup are slower while
+the GPU clocks up. Pages go through the GPU one at a time (a lock in
+`surya_engine`); PDF rendering of the next page still overlaps.
 
-**Tesseract** is CPU-bound: budget roughly 1–3 s per page at 300 DPI on one
-core. Without the semaphore, parallel requests just thrash the cores.
-
-Either way a 50-page PDF is a slow request, so consider a job queue rather
+A 50-page PDF is therefore a slow request, so consider a job queue rather
 than a synchronous call if you expect those routinely.
 
 PDF pages are rendered and OCR'd one at a time. Materialising 50 pages of

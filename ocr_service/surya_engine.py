@@ -1,8 +1,7 @@
 """Surya OCR engine (surya-ocr 0.17, in-process PyTorch).
 
-Same contract as the Tesseract path in ``ocr.py``: pages arrive as BGR numpy
-arrays and results leave as plain dicts with the same keys as
-``ocr.ocr_page``'s, so the API and the frontend do not care which engine ran.
+Pages arrive as BGR numpy arrays and results leave as plain dicts, the shape
+the API and the frontend consume.
 
 Surya downloads its model weights once, into its own cache directory; after
 that, inference is entirely local. Documents never leave this process, never
@@ -46,7 +45,7 @@ MAX_PIXELS = int(os.getenv("OCR_SURYA_MAX_PIXELS", str(20_000_000)))
 # Straighten pages tilted by at least this much before OCR. Surya itself
 # reads tilted lines fine, but a 1-2 degree tilt drops a table row's right
 # end (unit, range) a full line lower than its name, and rows fall apart.
-# Uses the Tesseract path's projection-profile estimator (~40 ms a page).
+# Uses the projection-profile estimator in ``ocr.py`` (~40 ms a page).
 DESKEW_MIN_DEG = float(os.getenv("OCR_SURYA_DESKEW_MIN_DEG", "0.3"))
 
 # Inline formatting the model emits (<b>, <i>, <sup>, <br>, <math>, ...).
@@ -170,9 +169,9 @@ def words_from_chars(chars: list[Any]) -> list[dict[str, Any]]:
     """Split a line's characters into words with boxes and confidences.
 
     Surya's own ``words_from_chars`` gives each word the confidence of its
-    *first* character; here it is the mean over all of them, on Tesseract's
-    0-100 scale. Characters without a valid box are special or formatting
-    tokens and are skipped.
+    *first* character; here it is the mean over all of them, rescaled to
+    0-100. Characters without a valid box are special or formatting tokens
+    and are skipped.
     """
     words: list[dict[str, Any]] = []
     text: list[str] = []
@@ -267,8 +266,8 @@ def _prepare(image: np.ndarray) -> tuple[np.ndarray, float, float]:
 def ocr_page(image: np.ndarray, *, lang: str = ocr.DEFAULT_LANG, detail: bool = False) -> dict[str, Any]:
     """OCR a single page image. Blocking -- callers run it off the event loop.
 
-    ``lang`` is accepted for signature parity with the Tesseract engine and
-    otherwise ignored.
+    ``lang`` is syntax-checked and echoed back on the response; Surya reads
+    every script it knows without a hint, so it is otherwise ignored.
     """
     from PIL import Image
 

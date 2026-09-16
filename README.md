@@ -26,7 +26,6 @@ reference documentation.
 | poppler | any recent | `pdftoppm -v` | Only if you feed it PDFs |
 | MariaDB / MySQL | 10.6+ / 8.0+ | `mysql --version` | Only to save lab results |
 | Node.js | 20+ | `node --version` | Only for the frontend |
-| Tesseract | 5.x | `tesseract --version` | No — optional fallback engine |
 
 Python **3.14 is not supported yet**: OpenCV publishes no wheels for it at the
 pinned version, so pip tries to build from source and fails.
@@ -95,9 +94,9 @@ still work.
 - *Debian/Ubuntu*: `sudo apt-get install -y poppler-utils`
 - *macOS*: `brew install poppler`
 
-**Tesseract** is optional — skip it unless you want the fallback engine.
-Surya is what the service runs on, and it needs no language data. A
-`tesseract: not found` entry in `/health` is expected, not a fault.
+That is the only system dependency. Surya is the OCR engine and needs no
+language data — it reads every script it knows, Khmer included, with no
+configuration.
 
 ---
 
@@ -148,7 +147,7 @@ The table itself is created automatically on the first save — you do not run
 .\run.ps1
 ```
 
-`run.ps1` handles the venv, Tesseract paths and poppler discovery for you.
+`run.ps1` handles the venv and poppler discovery for you.
 
 **The first start downloads ~1.5 GB of Surya models** from `models.datalab.to`
 into `%LOCALAPPDATA%\datalab\datalab\Cache\models`. That happens once. After
@@ -173,7 +172,6 @@ Useful variants:
 ```powershell
 .\run.ps1 -Port 8001              # if 8000 is taken (a PHP app owns it on some machines)
 .\run.ps1 -Reload                 # auto-reload while editing code
-.\run.ps1 -Engine tesseract       # the optional fallback engine
 ```
 
 ---
@@ -258,9 +256,9 @@ pip install -r ocr_service\requirements-dev.txt
 python -m pytest ocr_service\tests -q
 ```
 
-73 tests, a few seconds. They need neither a GPU nor the Surya models. On a
-machine without Tesseract, 5 of them skip — that is the normal result, not a
-failure.
+65 tests, a couple of seconds. They need neither a GPU nor the Surya models:
+the request path runs against canned predictions fed in at the predictor.
+Two skip unless you opt into the real models and the real database, below.
 
 Two opt-in suites hit real resources:
 
@@ -279,7 +277,7 @@ The database one deletes everything it writes.
 | --- | --- |
 | `ocr_service/main.py` | FastAPI app: routes, validation, error handling |
 | `ocr_service/surya_engine.py` | Surya (default engine) |
-| `ocr_service/ocr.py` | Tesseract engine and the image preprocessing pipeline |
+| `ocr_service/ocr.py` | Shared helpers: decoding, deskew, row grouping, language detection |
 | `ocr_service/lab_results.py` | Turns OCR output into structured lab records |
 | `ocr_service/lab_catalog.json` | Known tests, their categories, units and aliases |
 | `ocr_service/db.py` | MySQL storage and schema migrations |

@@ -40,8 +40,8 @@ MAX_UPLOAD_BYTES = int(os.getenv("OCR_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 READ_CHUNK_BYTES = 1024 * 1024
 DEBUG_TRACEBACKS = os.getenv("OCR_DEBUG", "").lower() in {"1", "true", "yes"}
 
-# Bound the number of documents being OCR'd at once.  Tesseract saturates a
-# core per page, so an unbounded threadpool just thrashes.
+# Bound the number of documents being OCR'd at once.  Pages go through the
+# GPU one at a time, so an unbounded threadpool just queues work deeper.
 MAX_CONCURRENCY = int(os.getenv("OCR_MAX_CONCURRENCY", str(min(4, (os.cpu_count() or 2)))))
 
 PDF_MAGIC = b"%PDF-"
@@ -75,14 +75,14 @@ logger = logging.getLogger("ocr_service")
 
 
 class LanguageGuess(BaseModel):
-    lang: str = Field(description="Tesseract-style code, e.g. 'eng'")
+    lang: str = Field(description="ISO 639-2/T code, e.g. 'eng'")
     iso639_1: str | None = None
     confidence: float = Field(description="0-1, from langdetect. Best effort.")
 
 
 class WordBox(BaseModel):
     text: str
-    conf: float = Field(description="Tesseract confidence, 0-100")
+    conf: float = Field(description="Model confidence, 0-100")
     bbox: list[int] = Field(description="[left, top, width, height] in preprocessed-image space")
     block: int
     par: int
@@ -148,7 +148,7 @@ class LabExtraction(BaseModel):
 class OcrResponse(BaseModel):
     filename: str | None
     media_type: str
-    engine: str = Field(description="OCR engine that produced the result: 'surya' or 'tesseract'")
+    engine: str = Field(description="OCR engine that produced the result: 'surya'")
     lang: str
     page_count: int
     languages: list[LanguageGuess]
@@ -203,19 +203,10 @@ async def lifespan(app: FastAPI):
     pdf = pdf_utils.backend_info()
     app.state.semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
 
-    if engines.name() == "surya":
-        # Loading the models takes ~15 s; do it off the event loop so the
-        # service answers /health (state: loading) in the meantime.
-        logger.info("OCR engine: Surya (loading models in the background)")
-        threading.Thread(target=engines.warm_up, name="surya-warm-up", daemon=True).start()
-    else:
-        engine = ocr.engine_info()
-        if engine["available"]:
-            logger.info("OCR engine: Tesseract %s (%d languages)", engine["version"], len(engine["languages"]))
-            if engines.missing_languages():
-                logger.warning("Missing expected language data: %s", ", ".join(engines.missing_languages()))
-        else:
-            logger.error("Tesseract is unavailable (%s); /ocr will return 503", engine["error"])
+    # Loading the models takes ~15 s; do it off the event loop so the
+    # service answers /health (state: loading) in the meantime.
+    logger.info("OCR engine: Surya (loading models in the background)")
+    threading.Thread(target=engines.warm_up, name="surya-warm-up", daemon=True).start()
 
     if pdf["available"]:
         logger.info("PDF backend: %s", pdf["backend"])
@@ -229,8 +220,7 @@ app = FastAPI(
     version="1.0.0",
     description=(
         "Extracts text from scanned or photographed documents (PNG/JPEG/WEBP/PDF) "
-        "using Surya OCR on the GPU, with Tesseract available as a fallback "
-        "(OCR_ENGINE=tesseract). Documents are processed in memory and never logged."
+        "using Surya OCR on the GPU. Documents are processed in memory and never logged."
     ),
     lifespan=lifespan,
 )
@@ -458,7 +448,7 @@ def _process(data: bytes, media_type: str, lang: str, detail: bool, dpi: int, la
 async def extract_text(
     request: Request,
     file: UploadFile = File(..., description="PNG, JPEG, WEBP or PDF"),
-    lang: str = Query(ocr.DEFAULT_LANG, description="Tesseract language spec, e.g. 'eng+fra+khm'"),
+    lang: str = Query(ocr.DEFAULT_LANG, description="Language spec, e.g. 'eng+fra+khm'. Echoed back: Surya needs no hint."),
     detail: bool = Query(False, description="Include per-word boxes and confidences"),
     dpi: int = Query(
         pdf_utils.DEFAULT_DPI,
@@ -560,27 +550,17 @@ async def health() -> dict[str, Any]:
     """Always 200 so a liveness probe does not restart a running process.
 
     Use the ``ready`` flag for readiness: it is false while Surya's models are
-    still loading, when the active engine failed to load, and (for Tesseract)
-    when expected language data is missing.
+    still loading and when the engine failed to load.
     """
-    engine = ocr.engine_info()
     pdf = pdf_utils.backend_info()
-    missing = [code for code in ocr.EXPECTED_LANGS if code not in engine["languages"]]
     ready = engines.ready()
 
     return {
         "status": "ok" if ready else "degraded",
         "ready": ready,
-        "engine": {**engines.info(), "missing_expected": engines.missing_languages()},
+        "engine": engines.info(),
         # Only saving lab reports needs it, so it does not affect `ready`.
         "database": await run_in_threadpool(db.info),
-        # The fallback engine's status, reported whichever engine is active.
-        "tesseract": {
-            "available": engine["available"],
-            "version": engine["version"],
-            "languages": engine["languages"],
-            "missing_expected": missing,
-        },
         "pdf": pdf,
         "limits": {
             "max_upload_bytes": MAX_UPLOAD_BYTES,
